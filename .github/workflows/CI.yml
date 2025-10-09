@@ -20,9 +20,6 @@ permissions:
 jobs:
   linux:
     runs-on: ${{ matrix.platform.runner }}
-    defaults:
-      run:
-        working-directory: interpreter-command
     strategy:
       matrix:
         platform:
@@ -44,6 +41,7 @@ jobs:
         with:
           python-version: 3.x
       - name: Build wheels
+        working-directory: interpreter-command
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
@@ -51,6 +49,7 @@ jobs:
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           manylinux: auto
       - name: Upload wheels
+        working-directory: interpreter-command
         uses: actions/upload-artifact@v4
         with:
           name: wheels-linux-${{ matrix.platform.target }}
@@ -58,9 +57,6 @@ jobs:
 
   musllinux:
     runs-on: ${{ matrix.platform.runner }}
-    defaults:
-      run:
-        working-directory: interpreter-command
     strategy:
       matrix:
         platform:
@@ -78,6 +74,7 @@ jobs:
         with:
           python-version: 3.x
       - name: Build wheels
+        working-directory: interpreter-command
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
@@ -85,6 +82,7 @@ jobs:
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           manylinux: musllinux_1_2
       - name: Upload wheels
+        working-directory: interpreter-command
         uses: actions/upload-artifact@v4
         with:
           name: wheels-musllinux-${{ matrix.platform.target }}
@@ -92,9 +90,6 @@ jobs:
 
   windows:
     runs-on: ${{ matrix.platform.runner }}
-    defaults:
-      run:
-        working-directory: interpreter-command
     strategy:
       matrix:
         platform:
@@ -109,12 +104,14 @@ jobs:
           python-version: 3.x
           architecture: ${{ matrix.platform.target }}
       - name: Build wheels
+        working-directory: interpreter-command
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
       - name: Upload wheels
+        working-directory: interpreter-command
         uses: actions/upload-artifact@v4
         with:
           name: wheels-windows-${{ matrix.platform.target }}
@@ -122,9 +119,6 @@ jobs:
 
   macos:
     runs-on: ${{ matrix.platform.runner }}
-    defaults:
-      run:
-        working-directory: interpreter-command
     strategy:
       matrix:
         platform:
@@ -138,12 +132,14 @@ jobs:
         with:
           python-version: 3.x
       - name: Build wheels
+        working-directory: interpreter-command
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist --find-interpreter
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
       - name: Upload wheels
+        working-directory: interpreter-command
         uses: actions/upload-artifact@v4
         with:
           name: wheels-macos-${{ matrix.platform.target }}
@@ -151,17 +147,16 @@ jobs:
 
   sdist:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: interpreter-command
     steps:
       - uses: actions/checkout@v4
       - name: Build sdist
+        working-directory: interpreter-command
         uses: PyO3/maturin-action@v1
         with:
           command: sdist
           args: --out dist
       - name: Upload sdist
+        working-directory: interpreter-command
         uses: actions/upload-artifact@v4
         with:
           name: wheels-sdist
