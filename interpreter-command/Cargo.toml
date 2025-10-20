@@ -9,4 +9,5 @@ name = "interpreter_command"
 crate-type = ["cdylib"]
 
 [dependencies]
+ai-compiler = { version = "0.1.0", path = "../ai-compiler" }
 pyo3 = "0.25.0"
