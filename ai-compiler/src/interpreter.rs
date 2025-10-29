@@ -1,27 +1,96 @@
-use std::collections::{HashMap, HashSet};
+#![allow(dead_code)]
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::compiler::{Program, Op, Value, Callable, Prop};
+use crate::ast::{GroupKind};
 use crate::error::{Error};
 
 
+#[derive(Debug)]
 struct StackFrame {
     return_addr: usize,
     stack_offset: usize,
+    parallel_completion: Vec<bool>,
+}
+
+#[derive(Debug)]
+struct ExecutionContext {
+    call_stack: Vec<StackFrame>,
+    stack: VecDeque<Value>,
+    ip: usize,
+    dependencies: Vec<ExecutionContext>,
+    active: bool,
+    dependency_type: GroupKind,
+    parent: Option<*mut ExecutionContext>,
+    native_proxy: bool,
+}
+
+impl ExecutionContext {
+    fn new(start: usize) -> ExecutionContext {
+        ExecutionContext {
+            call_stack: Vec::new(),
+            stack: VecDeque::new(),
+            ip: start,
+            dependencies: Vec::new(),
+            active: true,
+            dependency_type: GroupKind::Sequence,
+            parent: None,
+            native_proxy: false,
+        }
+    }
+
+    fn add_dependency(&mut self, mut ctx: ExecutionContext) {
+        ctx.parent = Some(self as *mut ExecutionContext);
+        self.dependencies.push(ctx);
+    }
+    
+    fn set_native_proxy(&mut self) {
+        self.native_proxy = true;
+    }
+
+    fn make_sequential(&mut self) {
+        self.dependency_type = GroupKind::Sequence;
+    }
+
+    fn make_parallel(&mut self) {
+        self.dependency_type = GroupKind::Parallel;
+    }
+    
+    fn make_race(&mut self) {
+        self.dependency_type = GroupKind::Race;
+    }
+
+    fn finalize(&mut self) {
+        self.active = false;
+    }
+
+    fn stack_offset(&self) -> usize {
+        self.call_stack.last().map(|frame| frame.stack_offset).unwrap_or(0)
+    }
 }
 
 
-#[derive(PartialEq)]
-pub enum InterpreterState {
+#[derive(PartialEq, Debug)]
+enum ExecutionState {
     Continue,
+    Yield,
+    ThreadsAdded,
+    CallEnd,
+    Stop,
+}
+
+#[derive(PartialEq, Debug)]
+pub enum InterpreterState {
     Yield,
     Stop,
 }
 
 pub struct Interpreter {
     program: Vec<Op>,
-    ip: usize,
-    stack: Vec<Value>,
-    call_stack: Vec<StackFrame>,
+    root_context: ExecutionContext,
+    // ip: usize,
+    // stack: Vec<Value>,
+    // call_stack: Vec<StackFrame>,
     props: HashMap<String, Box<dyn Prop>>,
     callables: HashMap<String, Box<dyn Callable>>,
     groups: HashMap<String, usize>,
@@ -30,7 +99,7 @@ pub struct Interpreter {
 
 macro_rules! pop {
     ($self:expr) => {
-        $self.stack.pop().ok_or(Error::StackUnderflow($self.ip - 1))
+        $self.stack.pop_back().ok_or(Error::StackUnderflow($self.ip - 1))
     }
 }
 
@@ -43,7 +112,7 @@ macro_rules! binop {
         let b = pop!($self)?;
 
         match (a, b) {
-            (Value::Number(n) , Value::Number(m)) => $self.stack.push($res(m $op n)),
+            (Value::Number(n) , Value::Number(m)) => $self.stack.push_back($res(m $op n)),
             (_, _) => {return Err(Error::Type("Both operands must be numbers".into()));},
         }
     }
@@ -53,31 +122,85 @@ macro_rules! logicop {
         let a = pop!($self)?;
         let b = pop!($self)?;
 
-        $self.stack.push(Value::Bool(a.truthy() $op b.truthy()));
+        $self.stack.push_back(Value::Bool(a.truthy() $op b.truthy()));
+    }
+}
+
+macro_rules! call {
+    ($self:expr, $ctx:expr, $name:expr, $arity:expr) => {
+        {
+        if let Some(callable) = $self.callables.get_mut($name) {
+            let mut args = Vec::new();
+            for _ in 0..$arity {
+                args.push(pop!($ctx)?);
+            }
+            args.reverse();
+            if !callable.call(args) {
+                $ctx.ip -= 1;
+                Ok(ExecutionState::Yield)
+            } else {
+                Ok(ExecutionState::CallEnd)
+            }
+        } else {
+            let Some(addr) = $self.groups.get($name) else {
+                return Err(Error::UnregisteredCallable($ctx.ip - 1, $name.into()));
+            };
+            $ctx.call_stack.push(StackFrame {
+                return_addr: $ctx.ip,
+                stack_offset: $ctx.stack.len() - $arity,
+                parallel_completion: Vec::new(),
+            });
+            $ctx.ip = *addr;
+            Ok(ExecutionState::Continue)
+        }
+        }
     }
 }
 
 impl Interpreter {
+    #[allow(dead_code)]
     pub fn new(program: Vec<Op>) -> Interpreter {
         Interpreter {
             groups: Self::scan_groups(&program),
             program,
-            ip: 0,
-            stack: Vec::new(),
-            call_stack: Vec::new(),
+            root_context: ExecutionContext::new(0),
+            // ip: 0,
+            // stack: Vec::new(),
+            // call_stack: Vec::new(),
             props: HashMap::new(),
             callables: HashMap::new(),
             running: false,
         }
     }
 
+    pub fn from_ir(program: &str) -> Result<Interpreter, Error> {
+        let mut prog: Vec<Op> = Vec::new();
+        for line in program.lines() {
+            prog.push(line.parse()?);
+        }
+        Ok(Interpreter::new(prog))
+    }
+
+    pub fn from_program(program: Program) -> Interpreter {
+        Interpreter {
+            groups: Self::scan_groups(&program.code),
+            program: program.code,
+            root_context: ExecutionContext::new(0),
+            props: program.props,
+            callables: program.callables,
+            running: false,
+        }
+    }
+
+    #[allow(dead_code)]
     pub fn run(program: Program) -> Result<(), Error> {
         let mut interpreter = Interpreter {
             groups: Self::scan_groups(&program.code),
             program: program.code,
-            ip: 0,
-            stack: Vec::new(),
-            call_stack: Vec::new(),
+            root_context: ExecutionContext::new(0),
+            // ip: 0,
+            // stack: Vec::new(),
+            // call_stack: Vec::new(),
             props: program.props,
             callables: program.callables,
             running: false,
@@ -86,6 +209,7 @@ impl Interpreter {
         interpreter.interpret()
     }
 
+    #[allow(dead_code)]
     pub fn register_callable(&mut self, name: &str, callable: Box<dyn Callable>) -> Result<(), Error> {
         if self.running {
             return Err(Error::InterpreterActive);
@@ -97,6 +221,7 @@ impl Interpreter {
         Ok(())
     }
     
+    #[allow(dead_code)]
     pub fn register_property(&mut self, name: &str, prop: Box<dyn Prop>) -> Result<(), Error> {
         if self.running {
             return Err(Error::InterpreterActive);
@@ -115,9 +240,7 @@ impl Interpreter {
 
     pub fn reset(&mut self) {
         self.running = false;
-        self.ip = 0;
-        self.stack.clear();
-        self.call_stack.clear();
+        self.root_context = ExecutionContext::new(0);
     }
 
     pub fn step(&mut self) -> Result<InterpreterState, Error> {
@@ -128,43 +251,137 @@ impl Interpreter {
             }
         }
         self.running = true;
-        let Some(op) = self.program.get(self.ip) else {
-            // If at any point we go over the end, this indicates termination.
-            self.running = false;
-            return Ok(InterpreterState::Stop);
-        };
-        self.ip += 1;
 
+        unsafe {
+            let mut queue: VecDeque<_> = vec![&mut self.root_context as *mut ExecutionContext].into();
+            while !queue.is_empty() {
+                // println!("{:?}", queue);
+                let ctx = queue.pop_front().unwrap_unchecked();
+
+                if !(*ctx).active {
+                    continue;
+                }
+
+                    
+                if (*ctx).dependency_type == GroupKind::Race && (*ctx).dependencies.iter().any(|c| !c.active){
+                    // for dep in (*ctx).dependencies.iter_mut() {
+                    //     if dep.active && dep.native_proxy {
+                    //         let Some(Op::Call(name, _)) = self.program.get(dep.ip) else {unreachable!()};
+                    //         let Some(callable) = self.callables.get_mut(name) else {unreachable!()};
+                    //         callable.terminate();
+                    //     }
+                    // }
+                    (*ctx).dependencies.clear();
+                } else {
+                    (*ctx).dependencies.retain(|c| c.active);
+                }
+
+                
+                if (*ctx).dependencies.len() == 0 {
+                    (*ctx).make_sequential();
+                    loop {
+                        match self.step_with(ctx.as_mut().unwrap_unchecked())? {
+                            ExecutionState::Continue => {continue;}
+                            ExecutionState::Yield => {break;}
+                            ExecutionState::ThreadsAdded => { 
+                                for dep in (*ctx).dependencies.iter_mut() {
+                                    queue.push_back(dep as *mut ExecutionContext);
+                                }
+                                break;
+                            }
+                            ExecutionState::CallEnd => {
+                                if (*ctx).native_proxy {
+                                    (*ctx).finalize();
+                                    // root will never be a native proxy
+                                    let Some(parent) = (*ctx).parent else {unreachable!()};
+                                    if (*parent).dependency_type == GroupKind::Race {
+                                        for dep in (*parent).dependencies.iter_mut() {
+                                            if dep.active && dep.native_proxy {
+                                                let Some(Op::Call(name, _)) = self.program.get(dep.ip) else {unreachable!()};
+                                                let Some(callable) = self.callables.get_mut(name) else {unreachable!()};
+                                                callable.terminate();
+                                                dep.finalize();
+                                            }
+                                        }
+                                    }
+                                }
+                                break;
+                            }
+                            ExecutionState::Stop => {
+                                (*ctx).finalize(); 
+                                if let Some(parent) = (*ctx).parent {
+                                    if (*parent).dependency_type == GroupKind::Race {
+                                        for dep in (*parent).dependencies.iter_mut() {
+                                            if dep.active && dep.native_proxy {
+                                                let Some(Op::Call(name, _)) = self.program.get(dep.ip) else {unreachable!()};
+                                                let Some(callable) = self.callables.get_mut(name) else {unreachable!()};
+                                                callable.terminate();
+                                                dep.finalize();
+                                            }
+                                        }
+                                        queue.push_back(parent);
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+                } else {
+                    for dep in (*ctx).dependencies.iter_mut() {
+                        queue.push_back(dep as *mut ExecutionContext);
+                    }
+                }
+            }
+        }
+
+        if !self.root_context.active {
+            Ok(InterpreterState::Stop)
+        } else {
+            Ok(InterpreterState::Yield)
+        }
+    }
+
+    fn step_with(&mut self, ctx: &mut ExecutionContext) -> Result<ExecutionState, Error> {
+        // println!("{:?}", ctx);
+        // println!("{} {:?}", ctx.ip, ctx.stack);
+        let Some(op) = self.program.get(ctx.ip) else {
+            // println!("IP out of bounds");
+            return Ok(ExecutionState::Stop);
+        };
+        ctx.ip += 1;
+       
         use Op::*;
         match op {
             Load(a) => {
-                let offset = self.stack_offset();
-                let value = self.stack.get(offset + a).ok_or(Error::IndexOutOfBounds(self.ip - 1))?;
-                self.stack.push(value.clone());
+                let offset = ctx.stack_offset();
+                let value = ctx.stack.get(offset + a).ok_or(Error::IndexOutOfBounds(ctx.ip - 1))?;
+                ctx.stack.push_back(value.clone());
             }
             Store(a) => {
-                let offset = self.stack_offset();
-                let value = pop!(self)?;
-                let slot = self.stack.get_mut(offset + a).ok_or(Error::IndexOutOfBounds(self.ip - 1))?;
-                *slot = value;
+                let offset = ctx.stack_offset();
+                if ctx.stack.len() > offset + a + 1 {
+                    let value = pop!(ctx)?;
+                    let slot = ctx.stack.get_mut(offset + a).ok_or(Error::IndexOutOfBounds(ctx.ip - 1))?;
+                    *slot = value;
+                }
             }
             Get(name) => {
                 // we assume the property exists at this point
                 let value = self.props[name].get();
-                self.stack.push(value);
+                ctx.stack.push_back(value);
             }
             Set(name) => {
                 // we assume the property exists and is settable at this point
-                let value = pop!(self)?;
+                let value = pop!(ctx)?;
                 self.props.get_mut(name).unwrap().set(value);
             }
-            Push(v) => self.stack.push(v.clone()),
-            Pop => {self.stack.pop();},
-            Dup => self.stack.push(self.stack.last().ok_or(Error::StackUnderflow(self.ip - 1))?.clone()),
+            Push(v) => ctx.stack.push_back(v.clone()),
+            Pop => {ctx.stack.pop_back();},
+            Dup => ctx.stack.push_back(ctx.stack.back().ok_or(Error::StackUnderflow(ctx.ip - 1))?.clone()),
             Add => {
-                let a = pop!(self)?;
-                let b = pop!(self)?;
-                
+                let a = pop!(ctx)?;
+                let b = pop!(ctx)?;
+               
                 let value = match (a,b) {
                     (Value::Number(n), Value::Number(m)) => Value::Number(m + n),
                     (Value::String(s), Value::String(t)) => Value::String(t + &s),
@@ -172,101 +389,154 @@ impl Interpreter {
                     (Value::String(_), _) => {return Err(Error::Type("Right operand must be a string".into()));},
                     (_, _) => {return Err(Error::Type("Operands must be a number or a string".into()));}
                 };
-                self.stack.push(value);
+                ctx.stack.push_back(value);
             }
-            Sub => {binop!(self, -);}
-            Mul => {binop!(self, *);}
-            Div => {binop!(self, /);}
-            Mod => {binop!(self, %);}
+            Sub => {binop!(ctx, -);}
+            Mul => {binop!(ctx, *);}
+            Div => {binop!(ctx, /);}
+            Mod => {binop!(ctx, %);}
             Exp => {
-                let a = pop!(self)?;
-                let b = pop!(self)?;
+                let a = pop!(ctx)?;
+                let b = pop!(ctx)?;
 
                 match (a, b) {
-                    (Value::Number(n) ,Value::Number(m)) => self.stack.push(Value::Number(m.powf(n))),
+                    (Value::Number(n) ,Value::Number(m)) => ctx.stack.push_back(Value::Number(m.powf(n))),
                     (_, _) => {return Err(Error::Type("Both operands must be numbers".into()));},
                 }
             }
             Neg => {
-                match self.stack.last_mut() {
+                match ctx.stack.back_mut() {
                     Some(Value::Number(n)) => {*n = -*n;},
-                    None => {return Err(Error::StackUnderflow(self.ip - 1))}
+                    None => {return Err(Error::StackUnderflow(ctx.ip - 1))}
                     _ => {return Err(Error::Type("Only numbers can be negated".into()));},
                 }
             }
             Abs => {
-                match self.stack.last_mut() {
+                match ctx.stack.back_mut() {
                     Some(Value::Number(n)) => {*n = n.abs();},
-                    None => {return Err(Error::StackUnderflow(self.ip - 1))}
+                    None => {return Err(Error::StackUnderflow(ctx.ip - 1))}
                     _ => {return Err(Error::Type("Absolute value only works with numbers".into()))}
                 }
             }
-            And => {logicop!(self, &&);}
-            Or => {logicop!(self, ||);}
+            And => {logicop!(ctx, &&);}
+            Or => {logicop!(ctx, ||);}
+            Not => {
+                match ctx.stack.back_mut() {
+                    Some(v) => {*v = Value::Bool(!v.truthy());},
+                    None => {return Err(Error::StackUnderflow(ctx.ip - 1))}
+                }
+            }
             Xor => {
-                let a = pop!(self)?;
-                let b = pop!(self)?;
+                let a = pop!(ctx)?;
+                let b = pop!(ctx)?;
 
                 let a = a.truthy();
                 let b = b.truthy();
 
-                self.stack.push(Value::Bool(a && !b || b && !a));
+                ctx.stack.push_back(Value::Bool(a && !b || b && !a));
             }
             Eq => {
-                let a = pop!(self)?;
-                let b = pop!(self)?;
-                self.stack.push(Value::Bool(a == b));
+                let a = pop!(ctx)?;
+                let b = pop!(ctx)?;
+                ctx.stack.push_back(Value::Bool(a == b));
             }
             Ne => {
-                let a = pop!(self)?;
-                let b = pop!(self)?;
-                self.stack.push(Value::Bool(a != b));
+                let a = pop!(ctx)?;
+                let b = pop!(ctx)?;
+                ctx.stack.push_back(Value::Bool(a != b));
             }
-            Lt => {binop!(self, Value::Bool, <);}
-            Le => {binop!(self, Value::Bool, <=);}
-            Gt => {binop!(self, Value::Bool, >);}
-            Ge => {binop!(self, Value::Bool, >=);}
+            Lt => {binop!(ctx, Value::Bool, <);}
+            Le => {binop!(ctx, Value::Bool, <=);}
+            Gt => {binop!(ctx, Value::Bool, >);}
+            Ge => {binop!(ctx, Value::Bool, >=);}
 
-            Jump(a) => {self.ip = *a;}
+            Jump(a) => {ctx.ip = ctx.ip.wrapping_add_signed(*a - 1);}
             JumpUnless(a) => {
-                let cond = pop!(self)?;
-                if !cond.truthy() {self.ip = *a;}
+                let cond = pop!(ctx)?;
+                if !cond.truthy() {ctx.ip = ctx.ip.wrapping_add_signed(*a - 1);}
             }
             JumpIf(a) => {
-                let cond = pop!(self)?;
-                if cond.truthy() {self.ip = *a;}
+                let cond = pop!(ctx)?;
+                if cond.truthy() {ctx.ip = ctx.ip.wrapping_add_signed(*a - 1);}
             }
 
-            Label(name) => {
+            Label(_name) => {
                 // No-op. Artefact of group identification.
             }
-            Call(name) => {
+            Call(name, arity) => {
                 // name almost definitely (if not absolutely) exists at this point
-                if let Some(callable) = self.callables.get_mut(name) {
-                    if !callable.call() {
-                        return Ok(InterpreterState::Yield);
-                    }
-                } else {
-                    let Some(addr) = self.groups.get(name) else {
-                        return Err(Error::UnregisteredCallable(self.ip - 1, name.into()));
-                    };
-                    self.call_stack.push(StackFrame {
-                        return_addr: self.ip,
-                        stack_offset: self.stack.len(),
-                    });
-                    self.ip = *addr;
-                }
-            }
-            CallParallel(name) => {
-                // TODO Because of this "parallelism", active built-in groups will need to be
-                // tracked individually, including their own stacks and state tracking. i.e. they 
-                // might need to be "instantiated" as their own callables.
+                // return self.call(ctx, name, *arity);
+                let res = call!(self, ctx, name, *arity)?;
+                return Ok(res);
+                // if res == ExecutionState::Yield {
+                //     return Ok(ExecutionState::Yield);
+                // }
             }
 
-            _ => todo!()
+            CallParallel(calls) => {
+                ctx.make_parallel();
+                for (name, arity) in calls.iter() {
+                    if let Some(addr) = self.groups.get(name) {
+                        let mut sub_ctx = ExecutionContext::new(*addr);
+                        // println!("claiming {} arguments for {}", arity, name);
+                        for _ in 0..*arity {
+                            let val = pop!(ctx)?;
+                            sub_ctx.stack.push_back(val);
+                        }
+                        if name.starts_with("#") {
+                            sub_ctx.set_native_proxy();
+                        }
+                        ctx.add_dependency(sub_ctx);
+                    } else {
+                        return Err(Error::InvalidCall(ctx.ip - 1));
+                    }
+                }
+                // ctx.ip += 1;
+                // This is not the intended use of this state, but it seems to be necessary.
+                return Ok(ExecutionState::ThreadsAdded);
+            }
+            CallRace(calls) => {
+                ctx.make_race();
+                // let container = ExecutionContext::new(ctx.ip+1);
+                for (name, arity) in calls.iter() {
+                    if let Some(addr) = self.groups.get(name) {
+                        let mut sub_ctx = ExecutionContext::new(*addr);
+                        // println!("claiming {} arguments for {}", arity, name);
+                        for _ in 0..*arity {
+                            let val = pop!(ctx)?;
+                            sub_ctx.stack.push_back(val);
+                        }
+                        if name.starts_with("#") {
+                            sub_ctx.set_native_proxy();
+                        }
+                        ctx.add_dependency(sub_ctx);
+                    } else {
+                        return Err(Error::InvalidCall(ctx.ip - 1));
+                    }
+                }
+                // ctx.ip += 1;
+                // This is not the intended use of this state, but it seems to be necessary.
+                return Ok(ExecutionState::ThreadsAdded);
+
+            }
+            Return => {
+                // This interpretation opens up the possibiilty of a naked return, but I don't know
+                // that's a problem?
+                match ctx.call_stack.pop() {
+                    Some(frame) => {
+                        ctx.ip = frame.return_addr;
+                    }
+                    None => {
+                        return Ok(ExecutionState::Stop);
+                    }
+                }
+            }
+
+            // _ => todo!()
         }
-        Ok(InterpreterState::Continue)
+        Ok(ExecutionState::Continue)
     }
+
 
     fn scan_groups(program: &[Op]) -> HashMap<String, usize> {
         let mut groups = HashMap::new();
@@ -302,16 +572,19 @@ impl Interpreter {
                         }
                     }
                 }
-                Op::Call(name) => {
+                Op::Call(name, _) => {
                     if !(self.callables.contains_key(name) || self.groups.contains_key(name)) && !seen.contains(name) {
                         seen.insert(name.clone());
                         errors.push(Error::UnregisteredCallable(i, name.into()));
                     }
                 }
-                Op::CallParallel(name) | Op::CallRace(name) => {
-                    if !self.groups.contains_key(name) && !seen.contains(name) {
-                        seen.insert(name.clone());
-                        errors.push(Error::InvalidCall(i));
+                Op::CallParallel(calls) | Op::CallRace(calls) => {
+                    for call in calls.iter() {
+                        let name = &call.0;
+                        if !(self.callables.contains_key(name) || self.groups.contains_key(name)) && !seen.contains(name) {
+                            seen.insert(name.clone());
+                            errors.push(Error::UnregisteredCallable(i, name.into()));
+                        }
                     }
                 }
                 _ => {}
@@ -322,10 +595,6 @@ impl Interpreter {
         } else {
             Err(errors)
         }
-    }
-
-    fn stack_offset(&self) -> usize {
-        self.call_stack.last().map(|frame| frame.stack_offset).unwrap_or(0)
     }
 
 }

@@ -3,6 +3,7 @@ use std::collections::{VecDeque};
 use unicode_segmentation::{UnicodeSegmentation, GraphemeIndices};
 
 use crate::token::{Token, TokenType, Literal};
+use crate::error::{Error};
 
 // assumes input is a grapheme cluster
 fn is_digit(g: &str) -> bool {
@@ -15,7 +16,7 @@ fn is_whitespace(g: &str) -> bool {
 }
 
 fn is_reserved_char(g: &str) -> bool {
-    is_whitespace(g) || (&["(", ")", "{", "}", "-", "+", "*", "/", "%", "^", "!", "=", "<", ">", "#", "$", "\"", "'", ";"][..]).contains(&g)
+    is_whitespace(g) || (&["(", ")", "|", "{", "}", "-", "+", "*", "/", "%", "^", "!", "=", "<", ">", "#", "$", "\"", "'", ";"][..]).contains(&g)
 }
 
 fn check_for(word: &str, sord: &str, ty: TokenType) -> TokenType {
@@ -52,10 +53,13 @@ fn word_type(word: &str) -> TokenType {
     }
 }
 
-pub struct LexerError {
-    start: usize,
-    len: usize,
-    msg: String,
+macro_rules! compound_op {
+    ($self:expr, $ty:expr, $compty:expr) => {
+        {
+            let ty = if $self.matches("=") {$compty} else {$ty};
+            $self.make_token(ty, None)
+        }
+    }
 }
 
 pub struct Lexer<'a> {
@@ -64,7 +68,7 @@ pub struct Lexer<'a> {
     peek_buf: VecDeque<(usize, &'a str)>,
     start: usize, // byte index
     current: usize, // byte length
-    errors: Vec<LexerError>,
+    errors: Vec<Error>,
 
     peek_token: Option<Token<'a>>,
 }
@@ -127,32 +131,21 @@ impl<'a> Lexer<'a> {
                 self.advance()?;
                 self.number()
             } else {
-                self.make_token(Minus, None)
+                compound_op!(self, Minus, MinusEqual)
             }
-            "+" => self.make_token(Plus, None),
-            "*" => self.make_token(Star, None),
-            "/" => self.make_token(Slash, None),
-            "%" => self.make_token(Percent, None),
-            "^" => self.make_token(Caret, None),
+            "+" => compound_op!(self, Plus, PlusEqual),
+            "*" => compound_op!(self, Star, StarEqual),
+            "/" => compound_op!(self, Slash, SlashEqual),
+            "%" => compound_op!(self, Percent, PercentEqual),
+            "^" => compound_op!(self, Caret, CaretEqual),
             "!" if self.matches("=") => self.make_token(BangEqual, None),
-            "=" => if self.matches("=") {
-                self.make_token(EqualEqual, None)
-            } else {
-                self.make_token(Equal, None)
-            }
-            "<" => if self.matches("=") {
-                self.make_token(LessEqual, None)
-            } else {
-                self.make_token(Less, None)
-            }
-            ">" => if self.matches("=") {
-                self.make_token(GreaterEqual, None)
-            } else {
-                self.make_token(Greater, None)
-            }
+            "=" => compound_op!(self, Equal, EqualEqual),
+            "<" => compound_op!(self, Less, LessEqual),
+            ">" => compound_op!(self, Greater, GreaterEqual),
             "#" => {
                 self.advance_while(|g| g != "\n");
-                self.make_token(Comment, None)
+                self.pass();
+                return self._scan();
             }
             ";" => self.make_token(Semicolon, None),
             // single and double quotes are supported
@@ -268,14 +261,19 @@ impl<'a> Lexer<'a> {
     }
 
     fn error(&mut self, msg: &str) {
-        self.errors.push(LexerError {
-            start: self.start,
-            len: self.current - self.start,
-            msg: msg.into(),
-        })
+        let mut line = 1;
+        for c in self.source.bytes() {
+            if c == b'\n' {
+                line += 1;
+            }
+        }
+        self.errors.push(Error::Lex{
+            line,
+            msg: msg.to_string(),
+        });
     } 
 
-    pub fn errors(&self) -> &Vec<LexerError> {
+    pub fn errors(&self) -> &Vec<Error> {
         &self.errors
     }
 }

@@ -10,7 +10,6 @@ type StmtResult<'a> = Result<Stmt<'a>>;
 
 pub struct Parser<'a> {
     tokens: Lexer<'a>,
-    current_token: Option<Token<'a>>,
     pub errors: Vec<Error>,
 }
 
@@ -45,7 +44,6 @@ impl<'a> Parser<'a> {
     pub fn new(lexer: Lexer<'a>) -> Parser<'a> {
         Parser {
             tokens: lexer,
-            current_token: None,
             errors: Vec::new(),
         }
     }
@@ -57,6 +55,7 @@ impl<'a> Parser<'a> {
                 statements.push(stmt);
             }
         }
+        self.errors.extend_from_slice(self.tokens.errors());
 
         self.errors.is_empty().then_some(statements)
         // statements
@@ -65,7 +64,7 @@ impl<'a> Parser<'a> {
     fn declaration(&mut self) -> Option<Stmt<'a>> {
         // println!("declaration");
         use TokenType::*;
-        let out = if self.check(Parallel) || self.check(Race) || self.check(Sequence) || self.check(Group) {
+        let out = if self.check(Group) || self.check(Parallel) || self.check(Race) {
             self.group_declaration()
         } else if self.matches(Use) {
             self.use_statement()
@@ -94,19 +93,10 @@ impl<'a> Parser<'a> {
     }
     
     fn group_declaration(&mut self) -> StmtResult<'a> {
-        // println!("group_declaration");
         let kind = self.advance();
-        let mut group_kind = GroupKind::Sequence;
-        if kind.ty == TokenType::Parallel {
-            group_kind = GroupKind::Parallel;
-        } else if kind.ty == TokenType::Race {
-            group_kind = GroupKind::Race;
-        }
-
         if kind.ty != TokenType::Group {
-            self.consume(TokenType::Group, "Expect keyword 'group' after group type specifier")?;
-        };
-
+            let _ = self.consume(TokenType::Group, "Expect 'group' after parallel specifier in group declaration")?;
+        }
         let name = self.consume(TokenType::Word, "Expect group name after keyword 'group'")?;
 
         let mut params = Vec::new();
@@ -118,17 +108,24 @@ impl<'a> Parser<'a> {
             }
         }
 
-        let _ = self.consume(TokenType::LeftBrace, "Expect '{' after argument list")?;
+        if kind.ty == TokenType::Group {
+            let _ = self.consume(TokenType::LeftBrace, "Expect '{' after argument list")?;
 
-        let mut body = Vec::new();
-        while !self.check(TokenType::RightBrace) {
-            let stmt = self.statement()?;
-            body.push(stmt);
+            let mut body = Vec::new();
+            while !self.check(TokenType::RightBrace) {
+                let stmt = self.statement()?;
+                body.push(stmt);
+            }
+
+            let _ = self.consume(TokenType::RightBrace, "Expect '}' after group declaration")?;
+            
+            Ok(Stmt::group(name, params, body))
+        } else {
+            let is_race = kind.ty == TokenType::Race;
+            let body = self.parallel_block(is_race)?;
+
+            Ok(Stmt::group(name, params, vec![body]))
         }
-
-        let _ = self.consume(TokenType::RightBrace, "Expect '}' after group declaration")?;
-        
-        Ok(Stmt::group(group_kind, name, params, body))
     }
 
     fn statement(&mut self) -> StmtResult<'a> {
@@ -138,6 +135,8 @@ impl<'a> Parser<'a> {
             self.if_statement()
         } else if self.check(While) || self.check(Until) {
             self.while_statement()
+        } else if self.check(Parallel) || self.check(Race) {
+            self.parallel_statement()
         } else if self.check(Ident) {
             self.var_statement()
         } else if self.check(Word) {
@@ -197,13 +196,42 @@ impl<'a> Parser<'a> {
     }
     
     fn var_statement(&mut self) -> StmtResult<'a> {
+        use TokenType::*;
         // println!("var_statement");
         let name = self.advance();
-        let _ = self.consume(TokenType::Equal, "Expect '=' after identifier in statment position");
-        let value = self.expression()?;
+
+        if self.peek().is_none() {
+            self.error(None, "Expected assignment operator")?;
+            unreachable!()
+        }
+        let op = self.advance();
+        if op.ty == TokenType::Equal {
+
+            let value = self.expression()?;
+            let _ = self.consume(TokenType::Semicolon, "Expect ';' after assignment");
+            
+            return Ok(Stmt::var(name, value));
+        }
+        let binop = match op.ty {
+            PlusEqual => (Plus, "+"),
+            MinusEqual => (Minus, "-"),
+            StarEqual => (Star, "*"),
+            SlashEqual => (Slash, "/"),
+            PercentEqual => (Percent, "%"),
+            CaretEqual => (Caret, "^"),
+            _ => {
+                self.error(Some(op.to_owned(self.tokens.source())), "Expected assignment operator".into())?;
+                unreachable!();
+            }
+
+        };
+
+        let tok = Token::artificial(binop.0, binop.1);
+        let var_expr = Expr::variable(name.clone());
+        let expr = Expr::binary(var_expr, tok, self.expression()?);
+
         let _ = self.consume(TokenType::Semicolon, "Expect ';' after assignment");
-        
-        Ok(Stmt::var(name, value))
+        Ok(Stmt::var(name, expr))
     }
     
     fn exec_statement(&mut self) -> StmtResult<'a> {
@@ -222,6 +250,26 @@ impl<'a> Parser<'a> {
         let _ = self.consume(TokenType::Semicolon, "Expect ';' after call")?;
 
         Ok(Stmt::exec(name, args))
+    }
+
+    fn parallel_block(&mut self, is_race: bool) -> StmtResult<'a> {
+        let _ = self.consume(TokenType::LeftBrace, "Expect '{' after 'parallel' keyword")?;
+
+        let mut calls = Vec::new();
+        while !self.check(TokenType::RightBrace) {
+            let Stmt::Exec(call) = self.exec_statement()? else {unreachable!()};
+            calls.push(call);
+        }
+
+        let _ = self.consume(TokenType::RightBrace, "Expect '}' after parallel statement")?;
+    
+        Ok(Stmt::parallel(calls, is_race))
+    }
+
+    fn parallel_statement(&mut self) -> StmtResult<'a> {
+        let is_race = self.advance().ty == TokenType::Race;
+
+        self.parallel_block(is_race)
     }
 
     fn expression(&mut self) -> ExprResult<'a> {
@@ -284,15 +332,15 @@ impl<'a> Parser<'a> {
         false
     }
 
-    // fn matches_group(&mut self, tys: &[TokenType]) -> bool {
-    //     for ty in tys {
-    //         if self.check(*ty) {
-    //             self.advance();
-    //             return true;
-    //         }
-    //     }
-    //     false
-    // }
+    fn matches_group(&mut self, tys: &[TokenType]) -> bool {
+        for ty in tys {
+            if self.check(*ty) {
+                self.advance();
+                return true;
+            }
+        }
+        false
+    }
 
     fn consume(&mut self, ty: TokenType, msg: &str) -> Result<Token<'a>> {
         if self.check(ty) {
@@ -307,10 +355,7 @@ impl<'a> Parser<'a> {
     }
 
     fn advance(&mut self) -> Token<'a> {
-        let mut next = self.tokens.next().unwrap();
-        if next.ty == TokenType::Comment {
-            next = self.tokens.next().unwrap();
-        }
+        let next = self.tokens.next().unwrap();
         next
     }
 
@@ -319,15 +364,9 @@ impl<'a> Parser<'a> {
     }
 
     fn peek(&mut self) -> Option<&Token<'a>> {
-        // let token = self.tokens.peek();
-        // if token.map(|t| t.ty == TokenType::Comment).unwrap_or(false) {
-        //     self.advance();
-        // }
         let out = self.tokens.peek();
         out
     }
-
-    // fn previous
 
     fn error(&mut self, tok: Option<OwnedToken>, msg: &str) -> Result<()> {
         Err(if let Some(tok) = tok {
@@ -337,14 +376,11 @@ impl<'a> Parser<'a> {
         })
     }
 
-    // fn default_error(&mut self, msg: &str) -> Result<()> {
-    //     let source = self.tokens.source();
-    //     let tok = self.peek().map(|tok| tok.to_owned(source));
-    //     self.error(tok, msg)
-    // }
-
     fn synchronize(&mut self) {
         use TokenType::*;
+        if let None = self.peek() {
+            return;
+        }
         let mut last_tok = self.advance();
         while let Some(tok) = self.peek() {
             if last_tok.ty == Semicolon {return;}

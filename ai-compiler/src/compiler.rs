@@ -1,5 +1,8 @@
+#![allow(dead_code)]
 use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::collections::{HashMap, HashSet};
+use unicode_segmentation::{UnicodeSegmentation};
+use itertools::Itertools;
 
 use crate::token::{TokenType};
 use crate::token::{Literal as LexLiteral};
@@ -41,7 +44,7 @@ impl Display for Value {
         match self {
             Value::Address(a) => write!(f, "*{}", a),
             Value::Number(n) => write!(f, "{}", n),
-            Value::String(s) => write!(f, "{}", s),
+            Value::String(s) => write!(f, "\"{}\"", s),
             Value::Bool(b) => write!(f, "{}", b),
             Value::Nil => write!(f, "nil"),
         }
@@ -71,6 +74,7 @@ impl std::str::FromStr for Value {
     }
 }
 
+#[derive(Clone)]
 pub enum Op {
     // Use(String),
 
@@ -103,16 +107,33 @@ pub enum Op {
     Gt,
     Ge,
 
-    Jump(usize), // absolute position
-    JumpUnless(usize),
-    JumpIf(usize),
+    Jump(isize), // absolute position
+    JumpUnless(isize),
+    JumpIf(isize),
 
     Label(String),
-    Call(String),
-    CallParallel(String),
-    CallRace(String),
-    End,
+    Call(String, usize),
+    CallParallel(Vec<(String, usize)>), // first usize is reverse offset. Will always be reverse
+    CallRace(Vec<(String, usize)>),
+    // StartPara(usize, usize), // call count, total arg count
     Return,
+}
+
+impl Op {
+    pub fn is_call(&self) -> bool {
+        match self {
+            Op::Call(_, _) | Op::CallParallel(_) | Op::CallRace(_) => true,
+            _ => false,
+        }
+    }
+}
+
+fn format_calls(calls: &[(String, usize)]) -> String {
+    let mut out = String::new();
+    for (name, arity) in calls {
+        out += &format!(" \"{}\" {}", name, arity);
+    }
+    out
 }
 
 impl Display for Op {
@@ -129,10 +150,10 @@ impl Display for Op {
             JumpUnless(a) => write!(f, "jump_unless {}", a),
             JumpIf(a) => write!(f, "jump_if {}", a),
             Label(s) => write!(f, "{}:", s),
-            Call(s) => write!(f, "call \"{}\"", s),
-            CallParallel(s) => write!(f, "call_parallel \"{}\"", s),
-            CallRace(s) => write!(f, "call_race \"{}\"", s),
-            End => write!(f, "end"),
+            Call(s, p) => write!(f, "call \"{}\" {}", s, p),
+            // StartPara(n, m) => write!(f, "start_para {} {}", n, m),
+            CallParallel(calls) => write!(f, "call_parallel{}", format_calls(calls)),
+            CallRace(calls) => write!(f, "call_race{}", format_calls(calls)),
             Return => write!(f, "return"),
             Pop => write!(f, "pop"),
             Dup => write!(f, "dup"),
@@ -158,10 +179,61 @@ impl Display for Op {
     }
 }
 
+fn shell_split(input: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut quoted = false;
+    let mut last_space = false;
+    for (i, g) in input.grapheme_indices(true) {
+        if last_space {
+            last_space = false;
+            start += 1;
+            continue;
+        }
+        if g == "\"" {
+            quoted = !quoted;
+            continue;
+        }
+        if g == " " && !quoted {
+            last_space = true;
+            parts.push(&input[start..i]);
+            start = i+1;
+        }
+    }
+
+    parts
+}
+
+fn parse_parallel_args(input: &[&str]) -> Result<Vec<(String, usize)>, Error> {
+    let (calls, rest) = input.as_chunks::<2>();
+    if rest.len()  != 0 {
+        return Err(Error::IRParse{line: 0, msg: format!("Every call in parallel call requires an arity")});
+    }
+    
+    let mut calls_out = Vec::new();
+    for call in calls {
+        if call[0].as_bytes()[0]  != b'"' {
+            return Err(Error::IRParse{line: 0, msg: "parallel calls must take a string".into()});
+        } else if !call[0][1..].contains("\"") {
+            return Err(Error::IRParse{line: 0, msg: "Unterminated string in parallel_call".into()});
+        } else {
+            let name = call[0][1..call[0].len()-1].to_string();
+
+            let arity = call[1].parse().map_err(|_| Error::IRParse {
+                line: 0,
+                msg: "Calls require the arity as a second argument".into(),
+            })?;
+            calls_out.push((name, arity));
+        }
+    }
+    Ok(calls_out)
+}
+
 impl std::str::FromStr for Op {
     type Err = Error;
     fn from_str(value: &str) -> Result<Op, Error> {
-        let parts = value.split(" ").collect::<Vec<&str>>();
+        // let parts = value.split(" ").collect::<Vec<&str>>();
+        let parts = shell_split(value);
         match parts[0] {
             // "use" => if parts[1].as_bytes()[0] != b'"' {
             //     Err(Error::IRParse{line: 0, msg: "'use' must take a string".into()})
@@ -210,23 +282,14 @@ impl std::str::FromStr for Op {
             } else if !parts[1][1..].contains("\"") {
                 Err(Error::IRParse{line: 0, msg: "Unterminated string in 'call'".into()})
             } else {
-                Ok(Op::Call(parts[1][1..parts[1].len()-1].into()))
+                let arity = parts[2].parse().map_err(|_| Error::IRParse {
+                    line: 0,
+                    msg: "Calls require the arity as a second argument".into(),
+                })?;
+                Ok(Op::Call(parts[1][1..parts[1].len()-1].into(), arity))
             }
-            "call_parallel" => if parts[1].as_bytes()[0] != b'"' {
-                Err(Error::IRParse{line: 0, msg: "'call_parallel' must take a string".into()})
-            } else if !parts[1][1..].contains("\"") {
-                Err(Error::IRParse{line: 0, msg: "Unterminated string in 'call_parallel'".into()})
-            } else {
-                Ok(Op::CallParallel(parts[1][1..parts[1].len()-1].into()))
-            }
-            "call_race" => if parts[1].as_bytes()[0] != b'"' {
-                Err(Error::IRParse{line: 0, msg: "'call_race' must take a string".into()})
-            } else if !parts[1][1..].contains("\"") {
-                Err(Error::IRParse{line: 0, msg: "Unterminated string in 'call_race'".into()})
-            } else {
-                Ok(Op::CallRace(parts[1][1..parts[1].len()-1].into()))
-            }
-            "end" => Ok(Op::End),
+            "call_parallel" => Ok(Op::CallParallel(parse_parallel_args(&parts[2..])?)),
+            "call_race" => Ok(Op::CallRace(parse_parallel_args(&parts[1..])?)),
             "return" => Ok(Op::Return),
             "pop" => Ok(Op::Pop),
             "dup" => Ok(Op::Dup),
@@ -263,15 +326,18 @@ impl std::str::FromStr for Op {
 }
 
 pub trait Callable {
-    fn call(&mut self) -> bool;
+    fn call(&mut self, args: Vec<Value>) -> bool;
+    fn terminate(&mut self) {}
     fn check_syntax(&self, args: Vec<Arg>) -> Result<(), Error>;
+    // fn arity(&self) -> usize;
 }
 
 
+#[allow(unused_variables)]
 pub trait Prop {
     fn get(&self) -> Value;
-    fn set(&mut self, val: Value);
-    fn settable(&self) -> bool;
+    fn set(&mut self, val: Value) {/* no-op */}
+    fn settable(&self) -> bool {false}
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -307,26 +373,35 @@ impl Display for Arg {
     }
 }
 
+
 #[derive(Clone)]
-struct CompiledGroup {
+struct GroupData {
     name: String,
-    kind: GroupKind,
-    address: usize,
+    // address: isize,
     params: Vec<Arg>,
 }
 
+#[derive(Clone)]
+struct CompiledGroup {
+    data: GroupData,
+    code: Vec<Op>
+}
+
 impl Callable for CompiledGroup {
-    fn call(&mut self) -> bool {
+    fn call(&mut self, _args: Vec<Value>) -> bool {
         panic!("This type only exists for the compiler. 'call' should never be called.")
     }
+    fn terminate(&mut self) {
+        panic!("This type only exists for the compiler. 'terminate' should never be called.")
+    }
     fn check_syntax(&self, args: Vec<Arg>) -> Result<(), Error> {
-        if args.len() != self.params.len() {
+        if args.len() != self.data.params.len() {
             return Err(Error::Call(format!("Call to '{}' expected {} arguments but got {}", 
-                                            self.name, 
-                                            self.params.len(), 
+                                            self.data.name, 
+                                            self.data.params.len(), 
                                             args.len())));
         }
-        for (i, (param, args)) in self.params.iter().zip(args.iter()).enumerate() {
+        for (i, (param, args)) in self.data.params.iter().zip(args.iter()).enumerate() {
             if param != args {
                 return Err(Error::Call(format!("Argument at position {} should be {}", i, param)));
             }
@@ -334,6 +409,9 @@ impl Callable for CompiledGroup {
 
         Ok(())
     }
+    // fn arity(&self) -> usize {
+    //     panic!("This type only exists for the compiler. 'arity' should never be called.")
+    // }
 }
 
 pub struct Program {
@@ -341,6 +419,13 @@ pub struct Program {
     pub callables: HashMap<String, Box<dyn Callable>>,
     pub props: HashMap<String, Box<dyn Prop>>,
 }
+
+impl Program {
+    pub fn export(&self) -> String {
+        self.code.iter().join("\n")
+    }
+}
+
 
 pub struct Compiler {
     groups: HashMap<String, CompiledGroup>,
@@ -367,11 +452,11 @@ impl<'a> Compiler {
     }
 
     pub fn compile(mut self, ast: Vec<Stmt<'a>>) -> Result<Program, Vec<Error>> {
-        let (groups, program): (Vec<Stmt<'a>>, _) = ast.into_iter().partition(|stmt| {
-            if let Stmt::Group(_) = stmt {true} else {false}
-        });
-      
-        let (uses, program): (Vec<Stmt<'a>>, _) = program.into_iter().partition(|stmt| {
+        // let (groups, program): (Vec<Stmt<'a>>, _) = ast.into_iter().partition(|stmt| {
+        //     if let Stmt::Group(_) = stmt {true} else {false}
+        // });
+  // 
+        let (uses, program): (Vec<Stmt<'a>>, _) = ast.into_iter().partition(|stmt| {
             if let Stmt::Use(_) = stmt {true} else {false}
         });
 
@@ -379,18 +464,25 @@ impl<'a> Compiler {
             us.accept_mut(&mut self);
         }
 
-        let group_code = self.isolate(move |this| {
-            for group in groups.iter() {
-                group.accept_mut(this);
+        let program = self.isolate(move |this| {
+            for stmt in program.iter() {
+                stmt.accept_mut(this);
+            }
+        });
+
+        let group_code = self.isolate(|this| {
+            for (_name, group) in this.groups.iter_mut() {
+                this.instructions.extend(group.code.drain(..));
             }
         });
         
-        self.instructions.push(Op::Jump(self.current_ip() + group_code.len() + 1));
+        self.instructions.push(Op::Jump(group_code.len() as isize + 1));
         self.instructions.extend(group_code);
+        self.instructions.extend(program);
         
-        for inst in program.iter() {
-            inst.accept_mut(&mut self);
-        }
+        // for inst in program.iter() {
+        //     inst.accept_mut(&mut self);
+        // }
 
 
         if self.errors.is_empty() {
@@ -451,8 +543,8 @@ impl<'a> Compiler {
         sub_program
     }
 
-    fn current_ip(&self) -> usize {
-        self.instructions.len()
+    fn current_ip(&self) -> isize {
+        self.instructions.len() as isize
     }
 }
 
@@ -542,7 +634,7 @@ impl<'a> ExprVisitorMut<'a, ()> for Compiler {
                 let sub_program = self.isolate(|this| {
                     expr.right.accept_mut(this);
                 });
-                self.instructions.push(Op::JumpUnless(self.current_ip() + sub_program.len() + 1));
+                self.instructions.push(Op::JumpUnless(sub_program.len() as isize + 1));
                 self.instructions.extend(sub_program);
                 self.instructions.push(Op::And);
             }
@@ -550,7 +642,7 @@ impl<'a> ExprVisitorMut<'a, ()> for Compiler {
                 let sub_program = self.isolate(|this| {
                     expr.left.accept_mut(this);
                 });
-                self.instructions.push(Op::JumpIf(self.current_ip() + sub_program.len() + 1));
+                self.instructions.push(Op::JumpIf(sub_program.len() as isize + 1));
                 self.instructions.extend(sub_program);
                 self.instructions.push(Op::Or);
             }
@@ -598,10 +690,9 @@ impl<'a> StmtVisitorMut<'a, ()> for Compiler {
 
         self.allowed_props.insert(name.into());
     }
-
+    
     fn visit_exec_stmt(&mut self, stmt: &Exec<'a>) {
         let name = stmt.name.lexeme;
-
         if !self.groups.contains_key(name) && !self.callables.contains_key(name) {
             self.errors.push(Error::UnknownCallable(name.into()));
             return;
@@ -626,29 +717,108 @@ impl<'a> StmtVisitorMut<'a, ()> for Compiler {
             }
         }
 
-
+        let mut arity = 0;
         for arg in stmt.args.iter() {
             if let AstArg::Value(v) = arg {
+                arity += 1;
                 v.accept_mut(self);
             }
         }
 
-        if let Some(group) = self.groups.get(name) {
-            match group.kind {
-                GroupKind::Parallel => self.instructions.push(Op::CallParallel(name.into())),
-                GroupKind::Race => self.instructions.push(Op::CallRace(name.into())),
-                GroupKind::Sequence => self.instructions.push(Op::Call(name.into()))
-            }
-        } else {
-            self.instructions.push(Op::Call(name.into()))
+        self.instructions.push(Op::Call(name.into(), arity));
+    }
+
+
+    fn visit_parallel_stmt(&mut self, stmt: &Parallel<'a>) {
+        let mut call_args = Vec::new();
+        for call in stmt.calls.iter() {
+            let name = call.name.lexeme;
+            if !self.groups.contains_key(name) && !self.callables.contains_key(name) {
+                self.errors.push(Error::UnknownCallable(name.into()));
+                return;
+            } 
+        
+            let arg_kinds = call.args.iter().map(|a| {
+                match a {
+                    AstArg::Word(w) => Arg::Word(w.lexeme.into()),
+                    AstArg::Value(_) => Arg::Value,
+                }
+            }).collect();
+
+            let arity = call.args.iter().filter(|a| if let AstArg::Value(_) = a {true} else {false}).count();
+            let name = if let Some(callable) = self.groups.get(name) {
+                if let Err(e) = callable.check_syntax(arg_kinds) {
+                    self.errors.push(e);
+                    return;
+                }
+                name.to_string()
+            } else {
+                if let Err(e) = self.callables[name].check_syntax(arg_kinds.clone()) {
+                    self.errors.push(e);
+                    return;
+                }
+
+                let anonymous_name = format!("#{}", name);
+                
+                if self.groups.contains_key(name) {
+                    continue;
+                }
+
+                let external_group = CompiledGroup {
+                    data: GroupData {
+                        name: anonymous_name.clone(),
+                        params: arg_kinds,
+                    },
+                    code: vec![
+                        // There's no need to push call arguments on the stack since the groups args 
+                        // are already in the right order for the call, and the immediate return
+                        // will ensure the either the stack frame is discarded or the context is
+                        // destroyed. Either way, the stack is well-formed.
+                        Op::Label(anonymous_name.clone()),
+                        Op::Call(name.to_string(), arity),
+                        Op::Return,
+                    ]
+                };
+
+                self.groups.insert(anonymous_name.clone(), external_group);
+
+                anonymous_name
+            };
+            call_args.push((name, arity));
         }
+        
+        let prep = self.isolate(|this| {
+            for call in stmt.calls.iter().rev() {
+                for arg in call.args.iter().rev() {
+                    match arg {
+                        AstArg::Value(expr) => expr.accept_mut(this),
+                        AstArg::Word(_) => continue,
+                    }
+                }
+            }
+        });
+        // let offset = prep.len();
+        // self.instructions.push(Op::StartPara(stmt.calls.len(), call_args.len()));
+        self.instructions.extend(prep);
+        self.instructions.push(if stmt.race {
+            Op::CallRace(call_args)
+        } else {
+            Op::CallParallel(call_args)
+        });
+        // Just have the parallel calls have a +1 at the end. It's either this or be even more
+        // opaque with the unnnecessary StartPara thing.
+        // self.instructions.push(Op::Jump(-(offset as isize + 1)));
     }
 
     fn visit_group_stmt(&mut self, stmt: &Group<'a>) {
-        // TODO 
-        // - Disallow recursion
-        // - Disallow state statements in non-sequential groups
         self.begin_scope();
+        
+        let name = stmt.name.lexeme.to_string();
+    
+        if self.callables.contains_key(&name) {
+            self.errors.push(Error::DuplicateCallable(name));
+            return;
+        }
 
         let params: Vec<_> = stmt.params.iter().map(|t| {
             match t.ty {
@@ -662,37 +832,33 @@ impl<'a> StmtVisitorMut<'a, ()> for Compiler {
             }
         }).collect();
         
+
         let body = self.isolate(|this| {
-            this.instructions.push(Op::Label(stmt.name.lexeme.to_string()));
+            this.instructions.push(Op::Label(name.clone()));
             for stmt in stmt.statements.iter() {
                 stmt.accept_mut(this);
             }
-            this.instructions.push(Op::End);
             for _ in 0..params.len() {
                 this.instructions.push(Op::Pop);
             }
             this.instructions.push(Op::Return);
         });
-
-        let name = stmt.name.lexeme.to_string();
+    
         let group = CompiledGroup {
-            name: name.clone(),
-            kind: stmt.kind,
-            params,
-            address: self.current_ip(),
+            data: GroupData {
+                name: name.clone(),
+                params,
+                // address: self.current_ip(),
+            },
+            code: body,
         };
-        self.instructions.extend(body);
+        
+        // self.instructions.extend(body);
+        self.groups.insert(name.clone(), group);
 
-        if self.callables.contains_key(&name) {
-            self.errors.push(Error::DuplicateCallable(name));
-        } else {
-            self.groups.insert(stmt.name.lexeme.to_string(), group.clone());
-        }
-        // if let Err(e) = self.register_callable(stmt.name.lexeme, Box::new(group)) {
-        //     self.errors.push(e);
-        // }
         self.end_scope();
     }
+
 
     fn visit_if_stmt(&mut self, stmt: &If<'a>) {
         stmt.condition.accept_mut(self);
@@ -710,28 +876,31 @@ impl<'a> StmtVisitorMut<'a, ()> for Compiler {
                 els.accept_mut(this);
             }
         });
-        let then_len = then_branch.len();
-        let else_len = else_branch.len();
+        let then_len = then_branch.len() as isize;
+        let else_len = else_branch.len() as isize;
 
-        self.instructions.push(Op::JumpUnless(self.current_ip() + then_len + 1));
+        self.instructions.push(Op::JumpUnless(then_len + 1));
         self.instructions.extend(then_branch);
-        self.instructions.push(Op::Jump(self.current_ip() + else_len + 1));
+        self.instructions.push(Op::Jump(else_len + 1));
     }
 
     fn visit_while_stmt(&mut self, stmt: &While<'a>) {
-        let start = self.current_ip();
-        stmt.condition.accept_mut(self);
-        if stmt.invert {
-            self.instructions.push(Op::Not);
-        }
+        let condition = self.isolate(|this| {
+            stmt.condition.accept_mut(this);
+            if stmt.invert {
+                this.instructions.push(Op::Not);
+            }
+        });
         let body = self.isolate(|this| {
             for line in stmt.body.iter() {
                 line.accept_mut(this)
             }
-            this.instructions.push(Op::Jump(start));
         });
 
-        self.instructions.push(Op::JumpUnless(self.current_ip() + body.len() + 1));
+        let len = (condition.len() + body.len()) as isize;
+        self.instructions.extend(condition);
+        self.instructions.push(Op::JumpUnless(body.len() as isize + 2));
         self.instructions.extend(body);
+        self.instructions.push(Op::Jump(-(len + 1)));
     }
 }

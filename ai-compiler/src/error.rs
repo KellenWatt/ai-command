@@ -2,8 +2,8 @@ use crate::token::OwnedToken;
 
 #[derive(Debug, thiserror::Error, Clone)]
 pub enum Error {
-    // #[error("[line {tok.line}] {msg}")]
-    // Lex{tok: OwnedToken, msg: String},
+    #[error("[line {line}] {msg}")]
+    Lex{line: usize, msg: String},
     #[error("[end] {msg}")]
     EndOfStream{msg: String},
     #[error("[line {line}] {msg}", line = tok.line)]
@@ -29,13 +29,13 @@ pub enum Error {
     UnregisteredProperty(usize, String),
     #[error("[address {0}] '{1}' is not a registered callable")]
     UnregisteredCallable(usize, String),
-    #[error("[address {0}] Only built-in callables can be called non-sequentially")]
+    #[error("[address {0}] Only built-in callables can be called in parallel")]
     InvalidCall(usize),
 
     #[error("[address {0}] Stack underflow")]
     StackUnderflow(usize),
-    #[error("[address {0}] Stack overflow")]
-    StackOverflow(usize),
+    // #[error("[address {0}] Stack overflow")]
+    // StackOverflow(usize),
     #[error("[address {0}] Attempt to index outside of the stack")]
     IndexOutOfBounds(usize),
     #[error("{0}")]

@@ -13,7 +13,7 @@ impl<'a> Display for Literal<'a> {
         use Literal::*;
         match self {
             Ident(name) => write!(f, "{}", name),
-            String(value) => write!(f, "{}", value),
+            String(value) => write!(f, "\"{}\"", value),
             Number(value) => write!(f, "{}", value),
             Bool(value) => write!(f, "{}", value),
             Nil => write!(f, "nil")
@@ -47,7 +47,7 @@ impl Display for OwnedLiteral {
         use OwnedLiteral::*;
         match self {
             Ident(name) => write!(f, "{}", name),
-            String(value) => write!(f, "{}", value),
+            String(value) => write!(f, "\"{}\"", value),
             Number(value) => write!(f, "{}", value),
             Bool(value) => write!(f, "{}", value),
             Nil => write!(f, "nil")
@@ -64,6 +64,7 @@ pub enum TokenType {
     // arithmetic
     LeftParen, RightParen,
     Minus, Plus, Slash, Star, Percent, Caret,
+    MinusEqual, PlusEqual, SlashEqual, StarEqual, PercentEqual, CaretEqual,
     // Dollar, //?
     Semicolon,
 
@@ -148,6 +149,7 @@ impl<'a> Token<'a> {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct OwnedToken {
     pub ty: TokenType,
     pub line: usize,

@@ -154,12 +154,13 @@ stmt! {
     If,
     While,
     Exec,
+    Parallel,
     Var,
 }
 
 impl<'a> Stmt<'a> {
-    pub fn group(kind: GroupKind, name: Token<'a>, params: Vec<Token<'a>>, statements: Vec<Stmt<'a>>) -> Stmt<'a> {
-        Stmt::Group(Group {kind, name, params, statements})
+    pub fn group(name: Token<'a>, params: Vec<Token<'a>>, statements: Vec<Stmt<'a>>) -> Stmt<'a> {
+        Stmt::Group(Group {name, params, statements})
     }
     pub fn r#use(name: Token<'a>) -> Stmt<'a> {
         Stmt::Use(Use{name})
@@ -173,12 +174,15 @@ impl<'a> Stmt<'a> {
     pub fn exec(name: Token<'a>, args: Vec<Arg<'a>>) -> Stmt<'a> {
         Stmt::Exec(Exec{name, args})
     }
+    pub fn parallel(calls: Vec<Exec<'a>>, race: bool) -> Stmt<'a> {
+        Stmt::Parallel(Parallel{calls, race})
+    }
     pub fn var(name: Token<'a>, value: Box<Expr<'a>>) -> Stmt<'a> {
         Stmt::Var(Var{name, value})
     }
 }
 
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Clone, Copy, Debug)]
 pub enum GroupKind {
     Sequence,
     Parallel,
@@ -186,7 +190,7 @@ pub enum GroupKind {
 }
 
 pub struct Group<'a> {
-    pub kind: GroupKind,
+    // pub kind: GroupKind,
     pub name: Token<'a>,
     pub params: Vec<Token<'a>>,
     pub statements: Vec<Stmt<'a>>,
@@ -231,6 +235,11 @@ impl<'a> From<Box<Expr<'a>>> for Arg<'a> {
 pub struct Exec<'a> {
     pub name: Token<'a>,
     pub args: Vec<Arg<'a>>
+}
+
+pub struct Parallel<'a> {
+    pub calls: Vec<Exec<'a>>,
+    pub race: bool,
 }
 
 pub struct Var<'a> {
