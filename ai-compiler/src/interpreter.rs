@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::compiler::{Program, Op, Value, Callable, Prop};
+use crate::compiler::{Program, Op, Value, Callable, CallableGenerator, Prop};
 use crate::ast::{GroupKind};
 use crate::error::{Error};
 
@@ -23,6 +23,7 @@ struct ExecutionContext {
     dependency_type: GroupKind,
     parent: Option<*mut ExecutionContext>,
     native_proxy: bool,
+    current_callable: Option<u32>,
 }
 
 impl ExecutionContext {
@@ -36,6 +37,7 @@ impl ExecutionContext {
             dependency_type: GroupKind::Sequence,
             parent: None,
             native_proxy: false,
+            current_callable: None,
         }
     }
 
@@ -92,8 +94,11 @@ pub struct Interpreter {
     // stack: Vec<Value>,
     // call_stack: Vec<StackFrame>,
     props: HashMap<String, Box<dyn Prop>>,
-    callables: HashMap<String, Box<dyn Callable>>,
+    callables: HashMap<String, Box<dyn CallableGenerator>>,
+    active_callables: HashMap<u32, Box<dyn Callable>>,
+    callable_index: u32,
     groups: HashMap<String, usize>,
+    ending: bool,
     running: bool,
 }
 
@@ -126,37 +131,6 @@ macro_rules! logicop {
     }
 }
 
-macro_rules! call {
-    ($self:expr, $ctx:expr, $name:expr, $arity:expr) => {
-        {
-        if let Some(callable) = $self.callables.get_mut($name) {
-            let mut args = Vec::new();
-            for _ in 0..$arity {
-                args.push(pop!($ctx)?);
-            }
-            args.reverse();
-            if !callable.call(args) {
-                $ctx.ip -= 1;
-                Ok(ExecutionState::Yield)
-            } else {
-                Ok(ExecutionState::CallEnd)
-            }
-        } else {
-            let Some(addr) = $self.groups.get($name) else {
-                return Err(Error::UnregisteredCallable($ctx.ip - 1, $name.into()));
-            };
-            $ctx.call_stack.push(StackFrame {
-                return_addr: $ctx.ip,
-                stack_offset: $ctx.stack.len() - $arity,
-                parallel_completion: Vec::new(),
-            });
-            $ctx.ip = *addr;
-            Ok(ExecutionState::Continue)
-        }
-        }
-    }
-}
-
 impl Interpreter {
     #[allow(dead_code)]
     pub fn new(program: Vec<Op>) -> Interpreter {
@@ -164,11 +138,11 @@ impl Interpreter {
             groups: Self::scan_groups(&program),
             program,
             root_context: ExecutionContext::new(0),
-            // ip: 0,
-            // stack: Vec::new(),
-            // call_stack: Vec::new(),
             props: HashMap::new(),
             callables: HashMap::new(),
+            active_callables: HashMap::new(),
+            callable_index: 0,
+            ending: false,
             running: false,
         }
     }
@@ -188,6 +162,9 @@ impl Interpreter {
             root_context: ExecutionContext::new(0),
             props: program.props,
             callables: program.callables,
+            active_callables: HashMap::new(),
+            callable_index: 0,
+            ending: false,
             running: false,
         }
     }
@@ -198,11 +175,11 @@ impl Interpreter {
             groups: Self::scan_groups(&program.code),
             program: program.code,
             root_context: ExecutionContext::new(0),
-            // ip: 0,
-            // stack: Vec::new(),
-            // call_stack: Vec::new(),
             props: program.props,
             callables: program.callables,
+            active_callables: HashMap::new(),
+            callable_index: 0,
+            ending: false,
             running: false,
         };
 
@@ -210,7 +187,7 @@ impl Interpreter {
     }
 
     #[allow(dead_code)]
-    pub fn register_callable(&mut self, name: &str, callable: Box<dyn Callable>) -> Result<(), Error> {
+    pub fn register_callable(&mut self, name: &str, callable: Box<dyn CallableGenerator>) -> Result<(), Error> {
         if self.running {
             return Err(Error::InterpreterActive);
         }
@@ -240,7 +217,46 @@ impl Interpreter {
 
     pub fn reset(&mut self) {
         self.running = false;
+        self.ending = false;
+        self.active_callables.clear();
+        self.callable_index = 0;
         self.root_context = ExecutionContext::new(0);
+    }
+
+    fn run_end(&mut self) -> Result<(), Error> {
+        self.ending = true;
+        self.root_context = ExecutionContext::new(0);
+        if let Some(addr) = self.groups.get("__end") {
+            self.root_context.ip = *addr;
+            while let InterpreterState::Yield = self.step()? {}
+        }
+        self.running = false;
+        Ok(())
+    }
+
+    pub fn end(&mut self) -> Result<(), Error> {
+        unsafe {
+            let mut stack: VecDeque<_> = vec![&mut self.root_context as *mut ExecutionContext].into();
+            while !stack.is_empty() {
+                let ctx = stack.pop_back().unwrap_unchecked();
+
+                if (*ctx).dependencies.is_empty() {
+                    if let Some(id) = (*ctx).current_callable {
+                        if (*ctx).active {
+                            self.active_callables.get_mut(&id).unwrap().terminate();
+                        }
+                        self.active_callables.remove(&id);
+                    }
+                }
+
+                for dep in (*ctx).dependencies.iter_mut() {
+                    stack.push_back(dep as *mut ExecutionContext);
+                }
+            }
+        }
+        self.run_end()?;
+
+        Ok(())
     }
 
     pub fn step(&mut self) -> Result<InterpreterState, Error> {
@@ -271,6 +287,15 @@ impl Interpreter {
                     //         callable.terminate();
                     //     }
                     // }
+                    for dep in (*ctx).dependencies.iter_mut() {
+                        if dep.current_callable.is_some() {
+                            let Some(id) = dep.current_callable.take() else {unreachable!()};
+                            if dep.active {
+                                self.active_callables.get_mut(&id).unwrap().terminate();
+                            }
+                            self.active_callables.remove(&id);
+                        }
+                    }
                     (*ctx).dependencies.clear();
                 } else {
                     (*ctx).dependencies.retain(|c| c.active);
@@ -296,12 +321,19 @@ impl Interpreter {
                                     let Some(parent) = (*ctx).parent else {unreachable!()};
                                     if (*parent).dependency_type == GroupKind::Race {
                                         for dep in (*parent).dependencies.iter_mut() {
-                                            if dep.active && dep.native_proxy {
-                                                let Some(Op::Call(name, _)) = self.program.get(dep.ip) else {unreachable!()};
-                                                let Some(callable) = self.callables.get_mut(name) else {unreachable!()};
-                                                callable.terminate();
-                                                dep.finalize();
+                                            if dep.current_callable.is_some() {
+                                                let Some(id) = dep.current_callable.take() else {unreachable!()};
+                                                if dep.active {
+                                                    self.active_callables.get_mut(&id).unwrap().terminate();
+                                                }
+                                                self.active_callables.remove(&id);
                                             }
+                                            // if dep.active && dep.native_proxy {
+                                            //     let Some(Op::Call(name, _)) = self.program.get(dep.ip) else {unreachable!()};
+                                            //     let Some(callable) = self.callables.get_mut(name) else {unreachable!()};
+                                            //     callable.terminate();
+                                            //     dep.finalize();
+                                            // }
                                         }
                                     }
                                 }
@@ -312,12 +344,19 @@ impl Interpreter {
                                 if let Some(parent) = (*ctx).parent {
                                     if (*parent).dependency_type == GroupKind::Race {
                                         for dep in (*parent).dependencies.iter_mut() {
-                                            if dep.active && dep.native_proxy {
-                                                let Some(Op::Call(name, _)) = self.program.get(dep.ip) else {unreachable!()};
-                                                let Some(callable) = self.callables.get_mut(name) else {unreachable!()};
-                                                callable.terminate();
-                                                dep.finalize();
+                                            if dep.current_callable.is_some() {
+                                                let Some(id) = dep.current_callable.take() else {unreachable!()};
+                                                if dep.active {
+                                                    self.active_callables.get_mut(&id).unwrap().terminate();
+                                                }
+                                                self.active_callables.remove(&id);
                                             }
+                                            // if dep.active && dep.native_proxy {
+                                            //     let Some(Op::Call(name, _)) = self.program.get(dep.ip) else {unreachable!()};
+                                            //     let Some(callable) = self.callables.get_mut(name) else {unreachable!()};
+                                            //     callable.terminate();
+                                            //     dep.finalize();
+                                            // }
                                         }
                                         queue.push_back(parent);
                                     }
@@ -335,6 +374,9 @@ impl Interpreter {
         }
 
         if !self.root_context.active {
+            if !self.ending {
+                self.run_end()?;
+            }
             Ok(InterpreterState::Stop)
         } else {
             Ok(InterpreterState::Yield)
@@ -464,13 +506,40 @@ impl Interpreter {
                 // No-op. Artefact of group identification.
             }
             Call(name, arity) => {
-                // name almost definitely (if not absolutely) exists at this point
-                // return self.call(ctx, name, *arity);
-                let res = call!(self, ctx, name, *arity)?;
-                return Ok(res);
-                // if res == ExecutionState::Yield {
-                //     return Ok(ExecutionState::Yield);
-                // }
+                if let Some(gener) = self.callables.get_mut(name) {
+                    if ctx.current_callable.is_none() {
+                        let new_callable = gener.generate();
+                        ctx.current_callable = Some(self.callable_index);
+                        self.active_callables.insert(self.callable_index, new_callable);
+                        self.callable_index += 1;
+                    };
+                    let callable = self.active_callables.get_mut(ctx.current_callable.as_ref().unwrap()).unwrap();
+
+                    let mut args = Vec::new();
+                    for _ in 0..*arity {
+                        args.push(pop!(ctx)?);
+                    }
+                    args.reverse();
+
+                    if !callable.call(args) {
+                        ctx.ip -= 1;
+                        return Ok(ExecutionState::Yield);
+                    } else {
+                        let Some(id) = ctx.current_callable.take() else {unreachable!()};
+                        self.active_callables.remove(&id);
+                        return Ok(ExecutionState::CallEnd);
+                    }
+                } else {
+                    let Some(addr) = self.groups.get(name) else {
+                        return Err(Error::UnregisteredCallable(ctx.ip - 1, name.into()));
+                    };
+                    ctx.call_stack.push(StackFrame {
+                        return_addr: ctx.ip,
+                        stack_offset: ctx.stack.len() - arity,
+                        parallel_completion: Vec::new(),
+                    });
+                    ctx.ip = *addr;
+                }
             }
 
             CallParallel(calls) => {

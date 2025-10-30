@@ -11,7 +11,7 @@ use itertools::Itertools;
 use crate::lexer::{Lexer};
 use crate::ast::{ExprVisitor, StmtVisitorMut, Arg as AstArg};
 use crate::parser::{Parser};
-use crate::compiler::{Compiler, Callable, Prop, Arg, Value};
+use crate::compiler::{Compiler, Callable, CallableGenerator, Prop, Arg, Value};
 use crate::error::Error;
 use crate::interpreter::{Interpreter, InterpreterState};
 
@@ -147,36 +147,12 @@ impl<'a> StmtVisitorMut<'a, String> for AstPrinter {
     }
 }
 
-struct DummyCallable;
-
-impl Callable for DummyCallable {
-    fn call(&mut self, _args: Vec<Value>) -> bool {
-        println!("called");
-        true
-    }
-
-    fn terminate(&mut self) {
-        println!("Woopsie! Stopping early");
-    }
-
-    fn check_syntax(&self, args: Vec<Arg>) -> Result<(), Error> {
-        if !args[0].is_value() {
-            return Err(Error::Call("Expected first arg to be a number".into()));
-        }
-        if args.len() == 2 && !args[1].get_word().map(|w| w == "degrees").unwrap_or(false) {
-            return Err(Error::Call("Expected literal word 'degrees'".into()))
-        }
-        Ok(())
-    }
-    // fn arity(&self) -> usize {1}
-}
 
 struct Print;
 
-impl Callable for Print {
-    fn call(&mut self, args: Vec<Value>) -> bool {
-        println!("{}", args[0]);
-        true
+impl CallableGenerator for Print {
+    fn generate(&mut self) -> Box<dyn Callable> {
+        Box::new(Print)
     }
 
     fn check_syntax(&self, args: Vec<Arg>) -> Result<(), Error> {
@@ -185,7 +161,27 @@ impl Callable for Print {
         }
         Ok(())
     }
-    // fn arity(&self) -> usize {1}
+}
+
+impl Callable for Print {
+    fn call(&mut self, args: Vec<Value>) -> bool {
+        println!("{}", args[0]);
+        true
+    }
+}
+
+struct CountdownGen;
+
+impl CallableGenerator for CountdownGen {
+    fn generate(&mut self) -> Box<dyn Callable> {
+        Box::new(Countdown{count: 10})
+    }
+    fn check_syntax(&self, args: Vec<Arg>) -> Result<(), Error> {
+        if args.len() > 0 {
+            return Err(Error::Call("Expected no arguments".into()));
+        }
+        Ok(())
+    }
 }
 
 struct Countdown {
@@ -204,7 +200,18 @@ impl Callable for Countdown {
     }
 
     fn terminate(&mut self) {
-        println!("launch aborted!");
+        println!("launch aborted at {}!", self.count);
+    }
+
+}
+
+struct CountupGen {
+    max: u32,
+}
+
+impl CallableGenerator for CountupGen {
+    fn generate(&mut self) -> Box<dyn Callable> {
+        Box::new(Countup::new(self.max))
     }
 
     fn check_syntax(&self, args: Vec<Arg>) -> Result<(), Error> {
@@ -226,7 +233,7 @@ impl Countup {
             max,
         }
     }
-    }
+}
 
 impl Callable for Countup {
     fn call(&mut self, _args: Vec<Value>) -> bool {
@@ -243,12 +250,6 @@ impl Callable for Countup {
         println!("I give up!");
     }
 
-    fn check_syntax(&self, args: Vec<Arg>) -> Result<(), Error> {
-        if args.len() > 0 {
-            return Err(Error::Call("Expected no arguments".into()));
-        }
-        Ok(())
-    }
 }
 
 struct DummyProp;
@@ -271,31 +272,46 @@ impl Prop for TimeProp {
 
 fn main() {
     let source = 
-        "use $time;
-        group greet $name {
-            print 'Hello, ' + $name + '!';
+        "
+        group __end {
+            print 'cleaning up!';
         }
 
-        group repeat $value $times times {
-            $i = 0;
-            until $i >= $times {
-                $i += 1;
-                print $value;
-            }
+        group off_by_one {
+            print 'delay';
+            countdown;
         }
-
-        group convention $name {
-            race {
-                repeat 'echo' 3 times;
-                countdown;
-                countup;
-            }
+        race {
+            off_by_one;
+            countdown;
+            countup;
         }
-        $start = $time;
-        print $start;
-        greet 'World';
-        convention 'Me';
-        print $time - $start;";
+        print 'Hello!';";
+        // "use $time;
+        // group greet $name {
+        //     print 'Hello, ' + $name + '!';
+        // }
+        // 
+        // group repeat $value $times times {
+        //     $i = 0;
+        //     until $i >= $times {
+        //         $i += 1;
+        //         print $value;
+        //     }
+        // }
+        // 
+        // group convention $name {
+        //     race {
+        //         repeat 'echo' 3 times;
+        //         countdown;
+        //         countup;
+        //     }
+        // }
+        // $start = $time;
+        // print $start;
+        // greet 'World';
+        // convention 'Me';
+        // print $time - $start;";
 
         // "
         // print \"Hello, World!\";
@@ -338,11 +354,9 @@ fn main() {
     //     }
     // }
     let mut compiler = Compiler::new();
-    let _ = compiler.register_callable("right", Box::new(DummyCallable));
-    let _ = compiler.register_callable("forward", Box::new(DummyCallable));
     let _ = compiler.register_callable("print", Box::new(Print));
-    let _ = compiler.register_callable("countdown", Box::new(Countdown{count: 10}));
-    let _ = compiler.register_callable("countup", Box::new(Countup::new(5)));
+    let _ = compiler.register_callable("countdown", Box::new(CountdownGen));
+    let _ = compiler.register_callable("countup", Box::new(CountupGen{max: 5}));
     let _ = compiler.register_property("angle", Box::new(DummyProp));
     let _ = compiler.register_property("position", Box::new(DummyProp));
     let _ = compiler.register_property("time", Box::new(TimeProp));

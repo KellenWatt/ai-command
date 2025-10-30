@@ -9,7 +9,7 @@ mod interpreter;
 pub use crate::lexer::{Lexer};
 pub use crate::parser::{Parser};
 pub use crate::error::{Error, Result};
-pub use crate::compiler::{Compiler, Callable, Prop, Arg, Value};
+pub use crate::compiler::{Compiler, Callable, CallableGenerator, Prop, Arg, Value};
 pub use crate::interpreter::{Interpreter as AiInterpreter, InterpreterState};
 
 use crate::compiler::{Program};
@@ -27,7 +27,7 @@ impl AiCompiler {
         }
     }
     
-    pub fn register_callable<C: Callable + 'static>(&mut self, name: &str, callable: C) -> Result<()> {
+    pub fn register_callable<C: CallableGenerator + 'static>(&mut self, name: &str, callable: C) -> Result<()> {
         if self.compiler.is_none() {
             self.compiler = Some(Compiler::new());
         }

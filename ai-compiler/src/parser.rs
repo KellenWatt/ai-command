@@ -94,8 +94,9 @@ impl<'a> Parser<'a> {
     
     fn group_declaration(&mut self) -> StmtResult<'a> {
         let kind = self.advance();
+        let is_race = kind.ty == TokenType::Race;
         if kind.ty != TokenType::Group {
-            let _ = self.consume(TokenType::Group, "Expect 'group' after parallel specifier in group declaration")?;
+            return self.parallel_block(is_race);
         }
         let name = self.consume(TokenType::Word, "Expect group name after keyword 'group'")?;
 
@@ -121,7 +122,6 @@ impl<'a> Parser<'a> {
             
             Ok(Stmt::group(name, params, body))
         } else {
-            let is_race = kind.ty == TokenType::Race;
             let body = self.parallel_block(is_race)?;
 
             Ok(Stmt::group(name, params, vec![body]))
