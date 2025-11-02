@@ -156,6 +156,9 @@ stmt! {
     Exec,
     Parallel,
     Var,
+    Return,
+    Yield,
+    Break,
 }
 
 impl<'a> Stmt<'a> {
@@ -179,6 +182,15 @@ impl<'a> Stmt<'a> {
     }
     pub fn var(name: Token<'a>, value: Box<Expr<'a>>) -> Stmt<'a> {
         Stmt::Var(Var{name, value})
+    }
+    pub fn r#return(tok: Token<'a>) -> Stmt<'a> {
+        Stmt::Return(Return{tok})
+    }
+    pub fn r#yield(tok: Token<'a>) -> Stmt<'a> {
+        Stmt::Yield(Yield{tok})
+    }
+    pub fn r#break(tok: Token<'a>) -> Stmt<'a> {
+        Stmt::Break(Break{tok})
     }
 }
 
@@ -245,4 +257,16 @@ pub struct Parallel<'a> {
 pub struct Var<'a> {
     pub name: Token<'a>,
     pub value: Box<Expr<'a>>,
+}
+
+pub struct Return<'a> {
+    pub tok: Token<'a>,
+}
+
+pub struct Yield<'a> {
+    pub tok: Token<'a>,
+}
+
+pub struct Break<'a> {
+    pub tok: Token<'a>,
 }

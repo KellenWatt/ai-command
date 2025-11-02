@@ -1,6 +1,7 @@
 use crate::token::OwnedToken;
 
 #[derive(Debug, thiserror::Error, Clone)]
+#[allow(dead_code)]
 pub enum Error {
     #[error("[line {line}] {msg}")]
     Lex{line: usize, msg: String},
@@ -32,6 +33,9 @@ pub enum Error {
     #[error("[address {0}] Only built-in callables can be called in parallel")]
     InvalidCall(usize),
 
+    #[error("{0} is not a valid Callable")]
+    InvalidCallable(String),
+
     #[error("[address {0}] Stack underflow")]
     StackUnderflow(usize),
     // #[error("[address {0}] Stack overflow")]
@@ -41,8 +45,14 @@ pub enum Error {
     #[error("{0}")]
     Type(String),
 
+
+    #[error("Cannot modify compiler state while it's running")]
+    CompilerActive,
     #[error("Cannot modify interpreter state while it's running")]
     InterpreterActive,
+
+    #[error("Something went wrong while accessing from multiple threads. Consider not doing that.")]
+    ThreadingError,
 
     // #[error("Value you at position {0} should be '{1}'")]
     // Call(usize, String),
@@ -51,6 +61,10 @@ pub enum Error {
 
     #[error("[line {line}] {msg}")]
     IRParse{line: usize, msg: String},
+
+    #[error("{0}")]
+    #[allow(dead_code)]
+    Foreign(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

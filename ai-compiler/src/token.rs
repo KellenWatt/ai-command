@@ -88,7 +88,9 @@ pub enum TokenType {
     Deadline, // may not use, but reserve for later use
     False, True, Nil,
     While, Until,
+    Break, //Continue, // break is hard to imitate, continue less so
     If, Else, Unless, // may not use unless, but reserving
+    Yield, Return,
     Use,
     // EOF,
 }

@@ -9,10 +9,9 @@ mod interpreter;
 pub use crate::lexer::{Lexer};
 pub use crate::parser::{Parser};
 pub use crate::error::{Error, Result};
-pub use crate::compiler::{Compiler, Callable, CallableGenerator, Prop, Arg, Value};
+pub use crate::compiler::{Compiler, Callable, CallableGenerator, Prop, Arg, Value, Program, Op};
 pub use crate::interpreter::{Interpreter as AiInterpreter, InterpreterState};
 
-use crate::compiler::{Program};
 
 
 pub struct AiCompiler {
@@ -52,6 +51,28 @@ impl AiCompiler {
         let ast = ast.unwrap();
         let compiler = self.compiler.take().unwrap_or_else(|| Compiler::new());
         compiler.compile(ast)
+    }
+
+    pub fn compile_nonconsuming(&mut self, source: &str) -> std::result::Result<Vec<Op>, Vec<Error>> {
+        let lexer = Lexer::new(source);
+        
+        let mut parser = Parser::new(lexer);
+        let ast = parser.parse();
+        if ast.is_none() {
+            return Err(parser.errors);
+        }
+        let ast = ast.unwrap();
+        if self.compiler.is_none() {
+            self.compiler = Some(Compiler::new());
+        }
+        self.compiler.as_mut().unwrap().compile_nonconsuming(ast)
+    }
+
+    pub fn package_program(&mut self, code: Vec<Op>) -> Program {
+        if self.compiler.is_none() {
+            self.compiler = Some(Compiler::new());
+        }
+        self.compiler.as_mut().unwrap().package_program(code)
     }
 
     pub fn convert(&mut self, source: &str) -> std::result::Result<AiInterpreter, Vec<Error>> {

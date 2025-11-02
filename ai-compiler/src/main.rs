@@ -29,11 +29,12 @@ pub struct AstPrinter {
 // }
 
 impl<'a> AstPrinter {
-    // fn print(e: &ast::Stmt) {
-    //     let mut printer = AstPrinter {indent: 0};
-    //     let s: String = e.accept_mut(&mut printer);
-    //     println!("{}", s);
-    // }
+    #[allow(dead_code)]
+    fn print(e: &ast::Stmt) {
+        let mut printer = AstPrinter {indent: 0};
+        let s: String = e.accept_mut(&mut printer);
+        println!("{}", s);
+    }
 
     fn parenthesize(&self, name: &str, args: &[&ast::Expr]) -> String {
         format!("({} {})", name, args.into_iter().map(|exp| {
@@ -145,14 +146,30 @@ impl<'a> StmtVisitorMut<'a, String> for AstPrinter {
         let kind = if stmt.race {"race"} else {"parallel"};
         format!("({} {})", kind, calls)
     }
+
+    fn visit_return_stmt(&mut self, _stmt: &ast::Return<'a>) -> String {
+        format!("(return)")
+    }
+    
+    fn visit_yield_stmt(&mut self, _stmt: &ast::Yield<'a>) -> String {
+        format!("(yield)")
+    }
+    
+    fn visit_break_stmt(&mut self, _stmt: &ast::Break<'a>) -> String {
+        format!("(break)")
+    }
 }
 
 
-struct Print;
+struct PrintGen;
 
-impl CallableGenerator for Print {
-    fn generate(&mut self) -> Box<dyn Callable> {
-        Box::new(Print)
+struct Print {
+    args: Vec<Value>
+}
+
+impl CallableGenerator for PrintGen {
+    fn generate(&mut self, args: Vec<Value>) -> Result<Box<dyn Callable>, Error> {
+        Ok(Box::new(Print{args}))
     }
 
     fn check_syntax(&self, args: Vec<Arg>) -> Result<(), Error> {
@@ -164,17 +181,17 @@ impl CallableGenerator for Print {
 }
 
 impl Callable for Print {
-    fn call(&mut self, args: Vec<Value>) -> bool {
-        println!("{}", args[0]);
-        true
+    fn call(&mut self) -> Result<bool, Error> {
+        println!("{}", self.args[0]);
+        Ok(true)
     }
 }
 
 struct CountdownGen;
 
 impl CallableGenerator for CountdownGen {
-    fn generate(&mut self) -> Box<dyn Callable> {
-        Box::new(Countdown{count: 10})
+    fn generate(&mut self, _args: Vec<Value>) -> Result<Box<dyn Callable>, Error> {
+        Ok(Box::new(Countdown{count: 10}))
     }
     fn check_syntax(&self, args: Vec<Arg>) -> Result<(), Error> {
         if args.len() > 0 {
@@ -189,18 +206,19 @@ struct Countdown {
 }
 
 impl Callable for Countdown {
-    fn call(&mut self, _args: Vec<Value>) -> bool {
+    fn call(&mut self) -> Result<bool, Error> {
         if self.count == 0 {
             println!("liftoff!");
-            return true;
+            return Ok(true);
         }
         println!("{}", self.count);
         self.count -= 1;
-        false
+        Ok(false)
     }
 
-    fn terminate(&mut self) {
+    fn terminate(&mut self) -> Result<(), Error> {
         println!("launch aborted at {}!", self.count);
+        Ok(())
     }
 
 }
@@ -210,8 +228,8 @@ struct CountupGen {
 }
 
 impl CallableGenerator for CountupGen {
-    fn generate(&mut self) -> Box<dyn Callable> {
-        Box::new(Countup::new(self.max))
+    fn generate(&mut self, _args: Vec<Value>) -> Result<Box<dyn Callable>, Error> {
+        Ok(Box::new(Countup::new(self.max)))
     }
 
     fn check_syntax(&self, args: Vec<Arg>) -> Result<(), Error> {
@@ -236,57 +254,62 @@ impl Countup {
 }
 
 impl Callable for Countup {
-    fn call(&mut self, _args: Vec<Value>) -> bool {
+    fn call(&mut self) -> Result<bool, Error> {
         if self.count == self.max {
             println!("Ready or not!");
-            return true;
+            return Ok(true);
         }
         println!("{}", self.count + 1);
         self.count += 1;
-        false
+        Ok(false)
     }
 
-    fn terminate(&mut self) {
+    fn terminate(&mut self) -> Result<(), Error> {
         println!("I give up!");
+        Ok(())
     }
 
 }
 
 struct DummyProp;
 impl Prop for DummyProp {
-    fn get(&self) -> Value {
-        Value::Number(42.0)
+    fn get(&self) -> Result<Value, Error> {
+        Ok(Value::Number(42.0))
     }
-    fn set(&mut self, v: Value) {
+    fn set(&mut self, v: Value) -> Result<(), Error> {
         println!("set {}", v);
+        Ok(())
     } 
-    fn settable(&self) -> bool {true}
+    fn settable(&self) -> Result<bool, Error> {Ok(true)}
 }
 
 struct TimeProp;
 impl Prop for TimeProp {
-    fn get(&self) -> Value {
-        Value::Number(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64())
+    fn get(&self) -> Result<Value, Error> {
+        Ok(Value::Number(std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs_f64()))
     }
 }
 
 fn main() {
-    let source = 
-        "
-        group __end {
-            print 'cleaning up!';
-        }
-
-        group off_by_one {
-            print 'delay';
-            countdown;
-        }
-        race {
-            off_by_one;
-            countdown;
-            countup;
-        }
-        print 'Hello!';";
+    // let source = 
+    //     "
+    //     group __end {
+    //         print 'cleaning up!';
+    //     }
+    // 
+    //     group off_by_one {
+    //         print 'delay';
+    //         countdown;
+    //     }
+    //     race {
+    //         off_by_one;
+    //         countdown;
+    //         countup;
+    //     }
+    //     print 'Hello!';";
         // "use $time;
         // group greet $name {
         //     print 'Hello, ' + $name + '!';
@@ -313,31 +336,16 @@ fn main() {
         // convention 'Me';
         // print $time - $start;";
 
-        // "
-        // print \"Hello, World!\";
-        // greet 'You';
-        // print \"Goodbye, Mars!\";
-        // convention \"Me\";";
-        // "use $angle;
-        // use $position;
-        // sequence group go_right $unit {
-        //     $var = 1;
-        //     right 90 degrees;
-        //     forward $unit;
-        // }
-        // while $angle < 270 {
-        //     go_right 1;
-        // }
-        // ";
-    //     "use $alliance;
-    //     if $alliance == 'Blue' {
-    //         go left 10;
-    //     } else if $alliance == 'Red' {
-    //         go right 10;
-    //     } else {
-    //         do nothing;
-    //     }
-    //     ";
+    let source = 
+        "$i = 0; 
+        while $i < 10 {
+            $i += 1;
+            yield;
+            print $i;
+            if $i > 5 {
+                break;
+            }
+        }";
     let lex = Lexer::new(source);
     
 
@@ -354,7 +362,7 @@ fn main() {
     //     }
     // }
     let mut compiler = Compiler::new();
-    let _ = compiler.register_callable("print", Box::new(Print));
+    let _ = compiler.register_callable("print", Box::new(PrintGen));
     let _ = compiler.register_callable("countdown", Box::new(CountdownGen));
     let _ = compiler.register_callable("countup", Box::new(CountupGen{max: 5}));
     let _ = compiler.register_property("angle", Box::new(DummyProp));

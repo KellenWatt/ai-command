@@ -35,11 +35,16 @@ fn word_type(word: &str) -> TokenType {
         }
         b'g' => check_for(word, "group", TokenType::Group),
         b'p' => check_for(word, "parallel", TokenType::Parallel),
-        b'r' => check_for(word, "race", TokenType::Race),
+        b'r' => if let Some(b'e') = bord.get(1) {
+            check_for(word, "return", TokenType::Return)
+        } else {
+            check_for(word, "race", TokenType::Race)
+        }
         b'd' => check_for(word, "deadline", TokenType::Deadline),
         b'f' => check_for(word, "false", TokenType::False),
         b't' => check_for(word, "true", TokenType::True),
         b'w' => check_for(word, "while", TokenType::While),
+        b'b' => check_for(word, "break", TokenType::Break),
         b'u' => {
             if word == "use" {TokenType::Use}
             else if word == "until" {TokenType::Until}
@@ -49,6 +54,7 @@ fn word_type(word: &str) -> TokenType {
         b'i' => check_for(word, "if", TokenType::If),
         b'e' => check_for(word, "else", TokenType::Else),
         b's' => check_for(word, "sequence", TokenType::Sequence),
+        b'y' => check_for(word, "yield", TokenType::Yield),
         _ => TokenType::Word
     }
 }

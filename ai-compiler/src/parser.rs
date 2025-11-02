@@ -11,6 +11,7 @@ type StmtResult<'a> = Result<Stmt<'a>>;
 pub struct Parser<'a> {
     tokens: Lexer<'a>,
     pub errors: Vec<Error>,
+    in_loop: bool,
 }
 
 macro_rules! binary_expr {
@@ -45,6 +46,7 @@ impl<'a> Parser<'a> {
         Parser {
             tokens: lexer,
             errors: Vec::new(),
+            in_loop: false,
         }
     }
 
@@ -139,8 +141,24 @@ impl<'a> Parser<'a> {
             self.parallel_statement()
         } else if self.check(Ident) {
             self.var_statement()
+        }else if self.check(Yield) {
+            let stmt = Stmt::r#yield(self.advance());
+            self.consume(TokenType::Semicolon, "Expect ';' after 'yield'")?;
+            Ok(stmt)
+        } else if self.check(Return) {
+            let stmt = Stmt::r#return(self.advance());
+            self.consume(TokenType::Semicolon, "Expect ';' after 'return'")?;
+            Ok(stmt)
         } else if self.check(Word) {
             self.exec_statement()
+        } else if self.check(Break) {
+            if self.in_loop {
+                let stmt = Stmt::r#break(self.advance());
+                self.consume(TokenType::Semicolon, "Expect ';' after 'break'")?;
+                Ok(stmt)
+            } else {
+                default_error!(self, "'break' is not allowed outside of loops");
+            }
         } else {
             default_error!(self, "Statements must be conditionals, loops, assignments, or calls");
         }
@@ -180,6 +198,7 @@ impl<'a> Parser<'a> {
     
     fn while_statement(&mut self) -> StmtResult<'a> {
         // println!("while_statement");
+        self.in_loop = true;
         let invert = self.advance().ty == TokenType::Until;
 
         let condition = self.expression()?;
@@ -192,6 +211,7 @@ impl<'a> Parser<'a> {
 
         let _ = self.consume(TokenType::RightBrace, "Expect '}' after loop body")?;
 
+        self.in_loop = false;
         Ok(Stmt::r#while(condition, invert, body))
     }
     
@@ -356,6 +376,7 @@ impl<'a> Parser<'a> {
 
     fn advance(&mut self) -> Token<'a> {
         let next = self.tokens.next().unwrap();
+        // println!("{}", next);
         next
     }
 
@@ -369,6 +390,7 @@ impl<'a> Parser<'a> {
     }
 
     fn error(&mut self, tok: Option<OwnedToken>, msg: &str) -> Result<()> {
+        println!("{:?}", tok);
         Err(if let Some(tok) = tok {
             Error::Parse{tok, msg: msg.to_string()}
         } else {

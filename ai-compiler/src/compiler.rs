@@ -4,6 +4,8 @@ use std::collections::{HashMap, HashSet};
 use unicode_segmentation::{UnicodeSegmentation};
 use itertools::Itertools;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use crate::token::{TokenType};
 use crate::token::{Literal as LexLiteral};
 use crate::ast::{Arg as AstArg, *};
@@ -112,6 +114,7 @@ pub enum Op {
     CallParallel(Vec<(String, usize)>), // first usize is reverse offset. Will always be reverse
     CallRace(Vec<(String, usize)>),
     // StartPara(usize, usize), // call count, total arg count
+    Yield,
     Return,
 }
 
@@ -151,6 +154,7 @@ impl Display for Op {
             CallParallel(calls) => write!(f, "call_parallel{}", format_calls(calls)),
             CallRace(calls) => write!(f, "call_race{}", format_calls(calls)),
             Return => write!(f, "return"),
+            Yield => write!(f, "yield"),
             Pop => write!(f, "pop"),
             Dup => write!(f, "dup"),
             Add => write!(f, "add"),
@@ -180,6 +184,7 @@ fn shell_split(input: &str) -> Vec<&str> {
     let mut start = 0;
     let mut quoted = false;
     let mut last_space = false;
+    
     for (i, g) in input.grapheme_indices(true) {
         if last_space {
             last_space = false;
@@ -196,6 +201,8 @@ fn shell_split(input: &str) -> Vec<&str> {
             start = i+1;
         }
     }
+
+    parts.push(&input[start..]);
 
     parts
 }
@@ -225,68 +232,79 @@ fn parse_parallel_args(input: &[&str]) -> Result<Vec<(String, usize)>, Error> {
     Ok(calls_out)
 }
 
+macro_rules! expect_len {
+    ($list:expr, $index:expr, $name:expr) => {
+        {
+            $list.get($index).ok_or(Error::IRParse {
+                line: 0,
+                msg: format!("'{}' expects {} arguments", $name, $index),
+            })?
+        }
+    }
+}
+
+
+macro_rules! parse_string {
+    ($value:expr, $op:expr) => {
+        {
+            if !$value.starts_with("\"") {
+                Err(Error::IRParse{line: 0, msg: format!("'{}' must take a string", $op)})
+            } else if $value.len() < 2 || !$value.ends_with("\"") {
+                Err(Error::IRParse{line: 0, msg: format!("Unterminated string in '{}'", $op)})
+            } else {
+                Ok($value[1..$value.len()-1].to_string())
+            }
+        }
+    }
+}
+
 impl std::str::FromStr for Op {
     type Err = Error;
     fn from_str(value: &str) -> Result<Op, Error> {
         // let parts = value.split(" ").collect::<Vec<&str>>();
         let parts = shell_split(value);
+        if parts.len() == 0 {
+            return Err(Error::IRParse {
+                line: 0,
+                msg: "No instruction present".into(),
+            })
+        }
         match parts[0] {
-            // "use" => if parts[1].as_bytes()[0] != b'"' {
-            //     Err(Error::IRParse{line: 0, msg: "'use' must take a string".into()})
-            // } else if !parts[1][1..].contains("\"") {
-            //     Err(Error::IRParse{line: 0, msg: "Unterminated string in 'use'".into()})
-            // } else {
-            //     Ok(Op::Use(parts[1][1..parts[1].len()-1].into()))
-            // }
-            "load" => parts[1].parse().map(|a| Op::Load(a)).map_err(|_| Error::IRParse {
+            "load" => expect_len!(parts, 1, "load").parse().map(|a| Op::Load(a)).map_err(|_| Error::IRParse {
                 line: 0,
                 msg: format!("Invalid stack address: '{}'", parts[1]),
             }),
-            "store" => parts[1].parse().map(|a| Op::Store(a)).map_err(|_| Error::IRParse {
+            "store" => expect_len!(parts, 1, "store").parse().map(|a| Op::Store(a)).map_err(|_| Error::IRParse {
                 line: 0,
                 msg: format!("Invalid stack address: '{}'", parts[1]),
             }),
-            "get" => if parts[1].as_bytes()[0] != b'"' {
-                Err(Error::IRParse{line: 0, msg: "'get' must take a string".into()})
-            } else if !parts[1][1..].contains("\"") {
-                Err(Error::IRParse{line: 0, msg: "Unterminated string in 'get'".into()})
-            } else {
-                Ok(Op::Get(parts[1][1..parts[1].len()-1].into()))
-            }
-            "set" => if parts[1].as_bytes()[0] != b'"' {
-                Err(Error::IRParse{line: 0, msg: "'set' must take a string".into()})
-            } else if !parts[1][1..].contains("\"") {
-                Err(Error::IRParse{line: 0, msg: "Unterminated string in 'set'".into()})
-            } else {
-                Ok(Op::Set(parts[1][1..parts[1].len()-1].into()))
-            }
-            "push" => parts[1].parse().map(|v| Op::Push(v)),
-            "jump" => parts[1].parse().map(|a| Op::Jump(a)).map_err(|_| Error::IRParse {
+            "get" => Ok(Op::Get(parse_string!(expect_len!(parts, 1, "get"), "get")?)),
+            "set" => Ok(Op::Set(parse_string!(expect_len!(parts, 1, "set"), "set")?)),
+            "push" => expect_len!(parts, 1, "push").parse().map(|v| Op::Push(v)),
+            "jump" => expect_len!(parts, 1, "jump").parse().map(|a| Op::Jump(a)).map_err(|_| Error::IRParse {
                 line: 0,
                 msg: format!("Invalid stack address: '{}'", parts[1]),
             }),
-            "jump_unless" => parts[1].parse().map(|a| Op::JumpUnless(a)).map_err(|_| Error::IRParse {
+            "jump_unless" => expect_len!(parts, 1, "jump_unless").parse().map(|a| Op::JumpUnless(a)).map_err(|_| Error::IRParse {
                 line: 0,
                 msg: format!("Invalid stack address: '{}'", parts[1]),
             }),
-            "jump_if" => parts[1].parse().map(|a| Op::JumpIf(a)).map_err(|_| Error::IRParse {
+            "jump_if" => expect_len!(parts, 1, "jump_if").parse().map(|a| Op::JumpIf(a)).map_err(|_| Error::IRParse {
                 line: 0,
                 msg: format!("Invalid stack address: '{}'", parts[1]),
             }),
-            "call" => if parts[1].as_bytes()[0] != b'"' {
-                Err(Error::IRParse{line: 0, msg: "'call' must take a string".into()})
-            } else if !parts[1][1..].contains("\"") {
-                Err(Error::IRParse{line: 0, msg: "Unterminated string in 'call'".into()})
-            } else {
-                let arity = parts[2].parse().map_err(|_| Error::IRParse {
+            "call" => {
+                let arity = expect_len!(parts, 2, "call").parse().map_err(|_| Error::IRParse {
                     line: 0,
                     msg: "Calls require the arity as a second argument".into(),
                 })?;
-                Ok(Op::Call(parts[1][1..parts[1].len()-1].into(), arity))
+                let name = parse_string!(parts[1], "call")?;
+                Ok(Op::Call(name, arity))
             }
-            "call_parallel" => Ok(Op::CallParallel(parse_parallel_args(&parts[2..])?)),
+            "call_parallel" => Ok(Op::CallParallel(parse_parallel_args(&parts[1..])?)),
             "call_race" => Ok(Op::CallRace(parse_parallel_args(&parts[1..])?)),
             "return" => Ok(Op::Return),
+            "yield" => Ok(Op::Yield),
             "pop" => Ok(Op::Pop),
             "dup" => Ok(Op::Dup),
             "add" => Ok(Op::Add),
@@ -321,22 +339,22 @@ impl std::str::FromStr for Op {
     }
 }
 
-pub trait Callable {
-    fn call(&mut self, args: Vec<Value>) -> bool;
-    fn terminate(&mut self) {}
+pub trait Callable: Send + Sync {
+    fn call(&mut self) -> Result<bool, Error>;
+    fn terminate(&mut self) -> Result<(), Error> {Ok(())}
     // fn arity(&self) -> usize;
 }
 
-pub trait CallableGenerator {
-    fn generate(&mut self) -> Box<dyn Callable>;
+pub trait CallableGenerator: Send + Sync {
+    fn generate(&mut self, args: Vec<Value>) -> Result<Box<dyn Callable>, Error>;
     fn check_syntax(&self, args: Vec<Arg>) -> Result<(), Error>;
 }
 
 #[allow(unused_variables)]
-pub trait Prop {
-    fn get(&self) -> Value;
-    fn set(&mut self, val: Value) {/* no-op */}
-    fn settable(&self) -> bool {false}
+pub trait Prop: Send + Sync {
+    fn get(&self) -> Result<Value, Error>;
+    fn set(&mut self, val: Value) -> Result<(), Error> {Ok(())}
+    fn settable(&self) -> Result<bool, Error> {Ok(false)}
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -408,7 +426,7 @@ impl CallableGenerator for CompiledGroup {
 
         Ok(())
     }
-    fn generate(&mut self) -> Box<dyn Callable> {
+    fn generate(&mut self, _args: Vec<Value>) -> Result<Box<dyn Callable>, Error> {
         panic!("This type only exists for the compiler. 'arity' should never be called.")
     }
 }
@@ -435,7 +453,11 @@ pub struct Compiler {
 
     variables: Vec<HashMap<String, usize>>,
     errors: Vec<Error>,
+    in_progress: AtomicBool,
 }
+
+unsafe impl Send for Compiler {}
+unsafe impl Sync for Compiler {}
 
 impl<'a> Compiler {
     pub fn new() -> Compiler {
@@ -447,20 +469,27 @@ impl<'a> Compiler {
             allowed_props: HashSet::new(),
             variables: vec![HashMap::new()],
             errors: Vec::new(),
+            in_progress: AtomicBool::new(false),
         }
     }
 
-    pub fn compile(mut self, ast: Vec<Stmt<'a>>) -> Result<Program, Vec<Error>> {
-        // let (groups, program): (Vec<Stmt<'a>>, _) = ast.into_iter().partition(|stmt| {
-        //     if let Stmt::Group(_) = stmt {true} else {false}
-        // });
-  // 
+    pub fn package_program(&mut self, code: Vec<Op>) -> Program {
+        Program {
+            code,
+            callables: std::mem::take(&mut self.callables),
+            props: std::mem::take(&mut self.properties),
+        }
+    }
+
+    pub fn compile_nonconsuming(&mut self, ast: Vec<Stmt<'a>>) -> Result<Vec<Op>, Vec<Error>> {
+        self.in_progress.store(true, Ordering::Release);
+
         let (uses, program): (Vec<Stmt<'a>>, _) = ast.into_iter().partition(|stmt| {
             if let Stmt::Use(_) = stmt {true} else {false}
         });
 
         for us in uses {
-            us.accept_mut(&mut self);
+            us.accept_mut(self);
         }
 
         let program = self.isolate(move |this| {
@@ -484,18 +513,30 @@ impl<'a> Compiler {
         // }
 
 
-        if self.errors.is_empty() {
-            Ok(Program {
-                code: self.instructions,
-                callables: self.callables,
-                props: self.properties,
-            })
+        
+        let res = if self.errors.is_empty() {
+            Ok(std::mem::take(&mut self.instructions))
         } else {
-            Err(self.errors)
-        }
+            Err(std::mem::take(&mut self.errors))
+        };
+
+        self.in_progress.store(false, Ordering::Release);
+        res
+    }
+
+    pub fn compile(mut self, ast: Vec<Stmt<'a>>) -> Result<Program, Vec<Error>> {
+        // No need to worry about updating `in_progress`, since this completely consumes the
+        // compiler
+        let code = self.compile_nonconsuming(ast)?;
+        let res = self.package_program(code);
+
+        Ok(res)
     }
 
     pub fn register_callable(&mut self, name: &str, callable: Box<dyn CallableGenerator>) -> Result<(), Error> {
+        if self.in_progress.load(Ordering::Acquire) {
+            return Err(Error::CompilerActive);
+        }
         if self.callables.contains_key(name) {
             return Err(Error::DuplicateCallable(name.into()));
         }
@@ -504,6 +545,9 @@ impl<'a> Compiler {
     }
 
     pub fn register_property(&mut self, name: &str, prop: Box<dyn Prop>) -> Result<(), Error> {
+        if self.in_progress.load(Ordering::Acquire) {
+            return Err(Error::CompilerActive);
+        }
         if self.properties.contains_key(name) {
             return Err(Error::DuplicateProperty(name.into()));
         }
@@ -665,9 +709,16 @@ impl<'a> StmtVisitorMut<'a, ()> for Compiler {
         };
 
         if let Some(prop) = self.properties.get(name) {
-            if !prop.settable() {
-                self.errors.push(Error::Compile{line: 0, msg: format!("External property '{}' not settable", name)});
-                return;
+            match prop.settable() {
+                Ok(false) => {
+                    self.errors.push(Error::Compile{line: 0, msg: format!("External property '{}' not settable", name)});
+                    return;
+                }
+                Err(e) => {
+                    self.errors.push(e);
+                    return;
+                }
+                _ => {}
             }
             self.instructions.push(Op::Set(name.into()));
         } else {
@@ -901,5 +952,28 @@ impl<'a> StmtVisitorMut<'a, ()> for Compiler {
         self.instructions.push(Op::JumpUnless(body.len() as isize + 2));
         self.instructions.extend(body);
         self.instructions.push(Op::Jump(-(len + 1)));
+
+        let sofar = self.instructions.len();
+        // backpatch any breaks
+        for (i, inst) in self.instructions.iter_mut().enumerate() {
+            if let Op::Jump(a) = inst {
+                if *a == 0 {
+                    *a = (sofar - i) as isize;
+                }
+            }
+        }
+    }
+
+    fn visit_return_stmt(&mut self, _stmt: &Return<'a>) {
+        self.instructions.push(Op::Return);
+    }
+    
+    fn visit_yield_stmt(&mut self, _stmt: &Yield<'a>) {
+        self.instructions.push(Op::Yield);
+    }
+
+    fn visit_break_stmt(&mut self, _stmt: &Break<'a>) {
+        self.instructions.push(Op::Jump(0)); // We'll use 0 to indicate that backpatching is
+                                             // necessary, since jump 0 doesn't make any sense
     }
 }

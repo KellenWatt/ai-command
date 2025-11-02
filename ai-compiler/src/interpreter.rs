@@ -1,6 +1,9 @@
 #![allow(dead_code)]
 use std::collections::{HashMap, HashSet, VecDeque};
 
+// use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex};
+
 use crate::compiler::{Program, Op, Value, Callable, CallableGenerator, Prop};
 use crate::ast::{GroupKind};
 use crate::error::{Error};
@@ -10,7 +13,6 @@ use crate::error::{Error};
 struct StackFrame {
     return_addr: usize,
     stack_offset: usize,
-    parallel_completion: Vec<bool>,
 }
 
 #[derive(Debug)]
@@ -87,6 +89,15 @@ pub enum InterpreterState {
     Stop,
 }
 
+#[derive(PartialEq, Debug)]
+enum InternalState {
+    Unstarted,
+    Suspended,
+    Active,
+    Ending,
+    Finished,
+}
+
 pub struct Interpreter {
     program: Vec<Op>,
     root_context: ExecutionContext,
@@ -98,8 +109,7 @@ pub struct Interpreter {
     active_callables: HashMap<u32, Box<dyn Callable>>,
     callable_index: u32,
     groups: HashMap<String, usize>,
-    ending: bool,
-    running: bool,
+    state: Mutex<InternalState>,
 }
 
 macro_rules! pop {
@@ -131,6 +141,12 @@ macro_rules! logicop {
     }
 }
 
+// These are safe because all modifying access to non-internal non-Send/Sync resources is strictly
+// governed by the `state` variable, which *is* thread-safe.
+
+unsafe impl Send for Interpreter {}
+unsafe impl Sync for Interpreter {}
+
 impl Interpreter {
     #[allow(dead_code)]
     pub fn new(program: Vec<Op>) -> Interpreter {
@@ -142,15 +158,22 @@ impl Interpreter {
             callables: HashMap::new(),
             active_callables: HashMap::new(),
             callable_index: 0,
-            ending: false,
-            running: false,
+            state: Mutex::new(InternalState::Unstarted),
         }
     }
 
     pub fn from_ir(program: &str) -> Result<Interpreter, Error> {
         let mut prog: Vec<Op> = Vec::new();
-        for line in program.lines() {
-            prog.push(line.parse()?);
+        for (i, line) in program.lines().enumerate() {
+            if line.len() > 0 {
+                let op = line.parse().map_err(|e| {
+                    match e {
+                        Error::IRParse{msg, ..} => Error::IRParse{line: i+1, msg},
+                        err => err,
+                    }
+                })?;
+                prog.push(op);
+            }
         }
         Ok(Interpreter::new(prog))
     }
@@ -164,8 +187,7 @@ impl Interpreter {
             callables: program.callables,
             active_callables: HashMap::new(),
             callable_index: 0,
-            ending: false,
-            running: false,
+            state: Mutex::new(InternalState::Unstarted),
         }
     }
 
@@ -179,8 +201,7 @@ impl Interpreter {
             callables: program.callables,
             active_callables: HashMap::new(),
             callable_index: 0,
-            ending: false,
-            running: false,
+            state: Mutex::new(InternalState::Unstarted),
         };
 
         interpreter.interpret()
@@ -188,7 +209,7 @@ impl Interpreter {
 
     #[allow(dead_code)]
     pub fn register_callable(&mut self, name: &str, callable: Box<dyn CallableGenerator>) -> Result<(), Error> {
-        if self.running {
+        if *self.state.lock().map_err(|_| Error::ThreadingError)? != InternalState::Unstarted {
             return Err(Error::InterpreterActive);
         }
         if self.callables.contains_key(name) || self.groups.contains_key(name) {
@@ -200,7 +221,7 @@ impl Interpreter {
     
     #[allow(dead_code)]
     pub fn register_property(&mut self, name: &str, prop: Box<dyn Prop>) -> Result<(), Error> {
-        if self.running {
+        if *self.state.lock().map_err(|_| Error::ThreadingError)? != InternalState::Unstarted {
             return Err(Error::InterpreterActive);
         }
         if self.props.contains_key(name) {
@@ -215,22 +236,28 @@ impl Interpreter {
         Ok(())
     }
 
-    pub fn reset(&mut self) {
-        self.running = false;
-        self.ending = false;
+    pub fn reset(&mut self) -> Result<(), Error> {
+        match *self.state.lock().map_err(|_| Error::ThreadingError)? {
+            InternalState::Active | InternalState::Ending => {
+                return Err(Error::InterpreterActive);
+            }
+            _ => {}
+        }
+        *self.state.get_mut().map_err(|_| Error::ThreadingError)? = InternalState::Unstarted;
         self.active_callables.clear();
         self.callable_index = 0;
         self.root_context = ExecutionContext::new(0);
+        Ok(())
     }
 
     fn run_end(&mut self) -> Result<(), Error> {
-        self.ending = true;
+        *self.state.get_mut().map_err(|_| Error::ThreadingError)? = InternalState::Ending;
         self.root_context = ExecutionContext::new(0);
         if let Some(addr) = self.groups.get("__end") {
             self.root_context.ip = *addr;
             while let InterpreterState::Yield = self.step()? {}
         }
-        self.running = false;
+        *self.state.get_mut().map_err(|_| Error::ThreadingError)? = InternalState::Finished;
         Ok(())
     }
 
@@ -243,7 +270,7 @@ impl Interpreter {
                 if (*ctx).dependencies.is_empty() {
                     if let Some(id) = (*ctx).current_callable {
                         if (*ctx).active {
-                            self.active_callables.get_mut(&id).unwrap().terminate();
+                            self.active_callables.get_mut(&id).unwrap().terminate()?;
                         }
                         self.active_callables.remove(&id);
                     }
@@ -260,13 +287,18 @@ impl Interpreter {
     }
 
     pub fn step(&mut self) -> Result<InterpreterState, Error> {
-        if !self.running {
+        if *self.state.lock().map_err(|_| Error::ThreadingError)? == InternalState::Unstarted {
             // FIXME This only returns the first error, which isn't ideal.
             if let Err(es) = self.verify_externals() {
                 return Err(es[0].clone());
             }
         }
-        self.running = true;
+        {
+            let state = self.state.get_mut().map_err(|_| Error::ThreadingError)?;
+            if *state != InternalState::Ending {
+                *state = InternalState::Active;
+            }
+        }
 
         unsafe {
             let mut queue: VecDeque<_> = vec![&mut self.root_context as *mut ExecutionContext].into();
@@ -280,18 +312,11 @@ impl Interpreter {
 
                     
                 if (*ctx).dependency_type == GroupKind::Race && (*ctx).dependencies.iter().any(|c| !c.active){
-                    // for dep in (*ctx).dependencies.iter_mut() {
-                    //     if dep.active && dep.native_proxy {
-                    //         let Some(Op::Call(name, _)) = self.program.get(dep.ip) else {unreachable!()};
-                    //         let Some(callable) = self.callables.get_mut(name) else {unreachable!()};
-                    //         callable.terminate();
-                    //     }
-                    // }
                     for dep in (*ctx).dependencies.iter_mut() {
                         if dep.current_callable.is_some() {
                             let Some(id) = dep.current_callable.take() else {unreachable!()};
                             if dep.active {
-                                self.active_callables.get_mut(&id).unwrap().terminate();
+                                self.active_callables.get_mut(&id).unwrap().terminate()?;
                             }
                             self.active_callables.remove(&id);
                         }
@@ -324,7 +349,7 @@ impl Interpreter {
                                             if dep.current_callable.is_some() {
                                                 let Some(id) = dep.current_callable.take() else {unreachable!()};
                                                 if dep.active {
-                                                    self.active_callables.get_mut(&id).unwrap().terminate();
+                                                    self.active_callables.get_mut(&id).unwrap().terminate()?;
                                                 }
                                                 self.active_callables.remove(&id);
                                             }
@@ -347,7 +372,7 @@ impl Interpreter {
                                             if dep.current_callable.is_some() {
                                                 let Some(id) = dep.current_callable.take() else {unreachable!()};
                                                 if dep.active {
-                                                    self.active_callables.get_mut(&id).unwrap().terminate();
+                                                    self.active_callables.get_mut(&id).unwrap().terminate()?;
                                                 }
                                                 self.active_callables.remove(&id);
                                             }
@@ -374,11 +399,17 @@ impl Interpreter {
         }
 
         if !self.root_context.active {
-            if !self.ending {
+            if *self.state.lock().map_err(|_| Error::ThreadingError)? != InternalState::Ending {
                 self.run_end()?;
             }
             Ok(InterpreterState::Stop)
         } else {
+            {
+                let state = self.state.get_mut().map_err(|_| Error::ThreadingError)?;
+                if *state != InternalState::Ending {
+                    *state = InternalState::Suspended;
+                }
+            }
             Ok(InterpreterState::Yield)
         }
     }
@@ -409,13 +440,13 @@ impl Interpreter {
             }
             Get(name) => {
                 // we assume the property exists at this point
-                let value = self.props[name].get();
+                let value = self.props[name].get()?;
                 ctx.stack.push_back(value);
             }
             Set(name) => {
                 // we assume the property exists and is settable at this point
                 let value = pop!(ctx)?;
-                self.props.get_mut(name).unwrap().set(value);
+                self.props.get_mut(name).unwrap().set(value)?;
             }
             Push(v) => ctx.stack.push_back(v.clone()),
             Pop => {ctx.stack.pop_back();},
@@ -508,20 +539,21 @@ impl Interpreter {
             Call(name, arity) => {
                 if let Some(gener) = self.callables.get_mut(name) {
                     if ctx.current_callable.is_none() {
-                        let new_callable = gener.generate();
+                        let mut args = Vec::new();
+                        for _ in 0..*arity {
+                            args.push(pop!(ctx)?);
+                        }
+                        args.reverse();
+                        
+                        let new_callable = gener.generate(args)?;
                         ctx.current_callable = Some(self.callable_index);
                         self.active_callables.insert(self.callable_index, new_callable);
                         self.callable_index += 1;
                     };
                     let callable = self.active_callables.get_mut(ctx.current_callable.as_ref().unwrap()).unwrap();
 
-                    let mut args = Vec::new();
-                    for _ in 0..*arity {
-                        args.push(pop!(ctx)?);
-                    }
-                    args.reverse();
 
-                    if !callable.call(args) {
+                    if !callable.call()? {
                         ctx.ip -= 1;
                         return Ok(ExecutionState::Yield);
                     } else {
@@ -536,7 +568,6 @@ impl Interpreter {
                     ctx.call_stack.push(StackFrame {
                         return_addr: ctx.ip,
                         stack_offset: ctx.stack.len() - arity,
-                        parallel_completion: Vec::new(),
                     });
                     ctx.ip = *addr;
                 }
@@ -560,9 +591,10 @@ impl Interpreter {
                         return Err(Error::InvalidCall(ctx.ip - 1));
                     }
                 }
-                // ctx.ip += 1;
-                // This is not the intended use of this state, but it seems to be necessary.
-                return Ok(ExecutionState::ThreadsAdded);
+
+                if calls.len() > 0 {
+                    return Ok(ExecutionState::ThreadsAdded);
+                }
             }
             CallRace(calls) => {
                 ctx.make_race();
@@ -583,10 +615,10 @@ impl Interpreter {
                         return Err(Error::InvalidCall(ctx.ip - 1));
                     }
                 }
-                // ctx.ip += 1;
-                // This is not the intended use of this state, but it seems to be necessary.
-                return Ok(ExecutionState::ThreadsAdded);
-
+            
+                if calls.len() > 0 {
+                    return Ok(ExecutionState::ThreadsAdded);
+                }
             }
             Return => {
                 // This interpretation opens up the possibiilty of a naked return, but I don't know
@@ -599,6 +631,9 @@ impl Interpreter {
                         return Ok(ExecutionState::Stop);
                     }
                 }
+            }
+            Yield => {
+                return Ok(ExecutionState::Yield);
             }
 
             // _ => todo!()
@@ -630,9 +665,17 @@ impl Interpreter {
                 }
                 Op::Set(name) => {
                     if let Some(prop) = self.props.get(name) {
-                        if !prop.settable() && !seen.contains(name) {
-                            seen.insert(name.clone());
-                            errors.push(Error::UnsettableProperty(i, name.into()));
+                        match prop.settable() {
+                            Ok(false) => {
+                                if !seen.contains(name) {
+                                    seen.insert(name.clone());
+                                    errors.push(Error::UnsettableProperty(i, name.into()));
+                                }
+                            }
+                            Err(e) => {
+                                errors.push(e);
+                            }
+                            _ => {}
                         }
                     } else {
                         if !seen.contains(name) {
