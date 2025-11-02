@@ -9,5 +9,5 @@ name = "ailangpy"
 crate-type = ["cdylib"]
 
 [dependencies]
-ailang = { version = "0.1.0", path = "../ai-compiler" }
+ailang = { version = "0.1.0", path = "../ailang" }
 pyo3 = "0.27"
