@@ -2,6 +2,12 @@
 name = "ailang"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+description = "The canonical implementation of the Ai automation language"
+homepage = "https://github.com/KellenWatt/ai-command"
+repository = "https://github.com/KellenWatt/ai-command"
+readme = "README.md"
+
 
 [lib]
 crate-type = ["cdylib", "lib"]
