@@ -2,7 +2,6 @@
 name = "ailang-py"
 version = "0.1.0"
 edition = "2021"
-
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
 name = "ailangpy"
@@ -10,4 +9,4 @@ crate-type = ["cdylib"]
 
 [dependencies]
 ailang = { version = "0.1.0", path = "../ailang" }
-pyo3 = "0.27"
+pyo3 = { version = "0.27", features = ["abi3-py313"] }
