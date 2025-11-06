@@ -25,7 +25,7 @@ dependencies = [
 
 [[package]]
 name = "ailang-py"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "ailang",
  "pyo3",

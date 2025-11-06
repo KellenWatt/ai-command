@@ -409,18 +409,6 @@ impl Interpreter {
 }
 
 
-// 
-// /// Formats the sum of two numbers as string.
-// #[pyfunction]
-// fn sum_as_string(a: usize, b: usize) -> PyResult<String> {
-//     Ok((a + b).to_string())
-// }
-// 
-// #[pyfunction]
-// fn print_value(value: AiValue) {
-//     println!("{}", *value);
-// }
-
 /// A Python module implemented in Rust.
 #[pymodule(name = "ailangpy")]
 fn load_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
