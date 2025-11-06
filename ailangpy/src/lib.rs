@@ -369,6 +369,32 @@ impl Interpreter {
         Ok(Interpreter(terp))
     }
 
+    #[staticmethod]
+    fn check_if_callable(value: &Bound<'_, PyAny>) -> bool {
+        value.is_instance_of::<AiCallableGenerator>()
+    }
+    
+    fn register_callable(&mut self, name: &str, value: Bound<'_, PyAny>) -> PyResult<()> {
+        if !Self::check_if_callable(&value) {
+            return Err(AiError::new_err("Not an instance of ailangpy.CallableGenerator"));
+        }
+
+        map_pyerr!(self.0.register_callable(name, Box::new(PyCallableGenerator(value.unbind()))))
+    }
+    
+    #[staticmethod]
+    fn check_if_prop(value: &Bound<'_, PyAny>) -> bool {
+        value.is_instance_of::<AiProp>()
+    }
+    
+    fn register_property(&mut self, name: &str, value: Bound<'_, PyAny>) -> PyResult<()> {
+        if !Self::check_if_prop(&value) {
+            return Err(AiError::new_err("Not an instance of ailangpy.Prop"));
+        }
+
+        map_pyerr!(self.0.register_property(name, Box::new(PyProp(value.unbind()))))
+    }
+
     fn reset(&mut self) -> PyResult<()> {
         map_pyerr!(self.0.reset())
     }
