@@ -223,7 +223,8 @@ impl AiProp {
         not_impl!("get")
     }
 
-    fn set(&self) -> PyResult<AiValue> {
+    #[allow(unused_variables)]
+    fn set(&self, value: AiValue) -> PyResult<()> {
         not_impl!("set")
     }
 
@@ -338,20 +339,20 @@ impl Compiler {
     }
 }
 
-#[pyclass]
-enum InterpreterState {
-    Yield,
-    Stop,
-}
-
-impl From<AiInterpreterState> for InterpreterState {
-    fn from(state: AiInterpreterState) -> Self {
-        match state {
-            AiInterpreterState::Yield => Self::Yield,
-            AiInterpreterState::Stop => Self::Stop,
-        }
-    }
-}
+// #[pyclass]
+// enum InterpreterState {
+//     Yield,
+//     Stop,
+// }
+// 
+// impl From<AiInterpreterState> for InterpreterState {
+//     fn from(state: AiInterpreterState) -> Self {
+//         match state {
+//             AiInterpreterState::Yield => Self::Yield,
+//             AiInterpreterState::Stop => Self::Stop,
+//         }
+//     }
+// }
 
 #[pyclass]
 struct Interpreter(AiInterpreter);
@@ -417,7 +418,7 @@ fn load_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_class::<Interpreter>()?;
     m.add_class::<Compiler>()?;
-    m.add_class::<InterpreterState>()?;
+    // m.add_class::<InterpreterState>()?;
     m.add_class::<AiArg>()?;
     m.add_class::<AiCallable>()?;
     m.add_class::<AiCallableGenerator>()?;
