@@ -166,7 +166,7 @@ impl AiCallableGenerator {
     /// kinds of `Callable`s.
     ///
     /// Note: unlike `check_syntax` these arguments will be actual values, and only values. Any
-    /// syntactical words are filtered out by the Ai runtime.
+    /// syntactical words are filtered out by the Ai compiler.
     #[allow(unused_variables)]
     fn generate(&mut self, args: Bound<'_, PyList>) -> PyResult<AiCallable> {
         // Should this just call the constructor by default?
@@ -305,20 +305,38 @@ struct AiProp;
 #[pymethods]
 impl AiProp {
     #[new]
-    fn new() -> AiProp {
+    #[pyo3(signature = (*args, **kwargs))]
+    #[allow(unused_variables)]
+    fn new(args: &Bound<'_, PyAny>, kwargs: Option<&Bound<'_, PyAny>>) -> AiProp {
         AiProp
     }
 
+    /// Retrieves a value from the property. The only allowed types are `int`, `float`, `str`,
+    /// `bool` and `None`. Anything else will cause a runtime error.
+    ///
+    /// This method should never be called directly, as its return value is completely opaque and
+    /// unusable in Python.
     fn get(&self) -> PyResult<AiValue> {
         not_impl!("get")
     }
 
+    /// Sets the value of the property, for some definition of "set". Setting a property to a
+    /// specific value does *not* imply that a subsequent call to `get` will return the same value.
+    ///
+    /// This method is only required if your program will set the value. There's no 
+    /// syntactical way to prevent assignment, but an unassignable property will report errors on
+    /// assignment at both compile-time and runtime.
+    ///
+    /// This method should never be called directly, as it is impossible to create the required
+    /// value in Python.
     #[allow(unused_variables)]
-    fn set(&self, value: AiValue) -> PyResult<()> {
+    fn set(&self, value: Bound<'_, PyAny>) -> PyResult<()> {
         not_impl!("set")
     }
 
-    fn settable(&self) -> PyResult<bool> {
+    /// Returns whether the property is settable. If a property is not settable, the `set` method
+    /// does not need to be implemented, as it can never be called.
+    fn is_settable(&self) -> PyResult<bool> {
         // Unsettable is intended to be the default. Most props are going to be read-only
         Ok(false)
     }
