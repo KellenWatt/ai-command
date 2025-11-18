@@ -1,0 +1,10 @@
+[project]
+name = "interpreter-command"
+version = "2025.1.0"
+description = "An adapter interface for Ai programs to be run with a RobotPy Command interface"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "ailangpy>=0.2.8",
+    "robotpy-commands-v2>=2025.3.2",
+]
