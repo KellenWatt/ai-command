@@ -129,7 +129,7 @@ class CommandAdapter(ailangpy.CallableGenerator):
     def check_syntax(self, args: list[ailangpy.Arg]):
         self.checker(args)
 
-def register_command(self: ailangpy.Interpreter, name: str, command: type[commands2.Command], checker: Callable[[list[ailangpy.Arg]], None], default_args: list[Any] = []):
+def register_command(self: ailangpy.Interpreter | ailangpy.Compiler, name: str, command: type[commands2.Command], checker: Callable[[list[ailangpy.Arg]], None], default_args: list[Any] = []):
     """
     Registers a Command with the given Interpreter instance, automatically wrapping it in the adapter. This method is
     monkey-patched into the actual Interpreter class, so there's no need to import it directly, so long as you import
@@ -140,4 +140,5 @@ def register_command(self: ailangpy.Interpreter, name: str, command: type[comman
 
 
 ailangpy.Interpreter.register_command = register_command
+ailangpy.Compiler.register_command = register_command
 
