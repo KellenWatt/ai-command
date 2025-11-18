@@ -2,14 +2,24 @@ import ailangpy
 import commands2
 from . import adapter
 
+from typing import Optional
+
 class AiCommand(commands2.Command):
+    """
+    Command for executing an Ai program based on the provided interpreter. This is just 
+    a thin wrapper for the Interpreter, so all functionality, including loading programs
+    and registering `Callable`s and `Prop`s should go through that interpreter.
+
+    For information on Ai, refer to the [Ai Project](https://github.com/KellenWatt/ai-command).
+    """
     terp: ailangpy.Interpreter
     complete: bool
 
-    def __init__(self, interpreter: ailangpy.Interpreter):
+    def __init__(self, interpreter: ailangpy.Interpreter, *subsystems: commands2.Subsystem):
         super().__init__()
         self.terp = interpreter
         self.complete = False
+        self.addRequirements(*subsystems)
 
     def initialize(self):
         self.terp.reset()
@@ -36,6 +46,16 @@ def _print_checker(args: list[ailangpy.Arg]):
         assert arg.is_value(), f"'print' does not accept words (word at {i})"
 
 def interpreter_from_ir(ir: str) -> ailangpy.Interpreter:
+    """
+    Helper function to construct a basic Interpreter from pre-existing Ai IR, with built-in
+    support for existing `commands2` commands.
+
+    Two Callables are provided by default: `wait` and `print`, which respectively wrap
+    `commands2.WaitCommand` and `commands2.PrintCommand`. Anything else must be 
+    registered with the Interpreter manually. If you do not want these by default, or 
+    want them to have different behaviour for those words, you should create an Interpreter
+    directly.
+    """
     terp = ailangpy.Interpreter(ir)
     terp.register_command("wait", commands2.WaitCommand, _wait_checker)
     terp.register_command("print", commands2.PrintCommand, _print_checker)

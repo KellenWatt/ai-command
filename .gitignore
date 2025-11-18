@@ -10,3 +10,4 @@ __pycache__
 /interpreter-command/onexit.cd
 /interpreter-command/uv.lock
 /interpreter-command/.python-version
+/interpreter-command/.pypi_upload

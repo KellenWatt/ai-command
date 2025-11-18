@@ -5,10 +5,6 @@ from enum import Enum, auto
 from typing import Callable, Any
 
 
-class CommandState(Enum):
-    Inactive = auto()
-    Active = auto()
-    Complete = auto()
 
 
 def define_syntax(syntax: str) -> Callable[[list[ailangpy.Arg]], None]:
@@ -23,7 +19,7 @@ def define_syntax(syntax: str) -> Callable[[list[ailangpy.Arg]], None]:
     The middle token can match any value (even ones that don't make sense) since it's an asterisk, but the
     others have to match their corresponding parameter exactly.
 
-    Note in the above example that the syntax string always matches 'degrees', but not 'degree', only supports
+    Note in the above example that the syntax string always matches 'degrees', not 'degree', only supports
     degrees, not radians, and can't describe a tolerance. This helper has no concept of pluralization, alternate 
     spellings, or multiple interpretations. To support these, you'll need to define your own syntax 
     checker manually (not terribly difficult, but supporting these behaviours in the general case would 
@@ -62,41 +58,71 @@ def simple_args(arg_count: int) -> Callable[[list[ailangpy.Arg]], None]:
 
 
 class CommandAdapter(ailangpy.CallableGenerator):
+    """
+    Interface for using a WPILib `Command` as an Ai `Callable`. This class implements `CallableGenerator`, and 
+    generates the internal class `CommandAdapter.GeneratedCommandAdapter`, which implements `Callable` using 
+    the wrapped `Command`'s lifecycle methods.
+
+    Since `Command`s don't have the concept of syntax, and thus have nothing to check, you'll need to provide 
+    a function (or Python `Callable` of any variety), that can be used for `CallableGenerator.check_syntax`.
+    This is handled in the constructor.
+
+    You can additionally supply some default arguments that will be passed through to every `Command` instance
+    generated.
+    """
     command_class: type[commands2.Command]
     checker: Callable[[list[ailangpy.Arg]], None]
     default_args: list[Any]
 
+    class CommandState(Enum):
+        """Internal type that represents the current state of a `GeneratedCommandAdapter`. You should never
+        need to use this directly."""
+        Inactive = auto()
+        Active = auto()
+        Complete = auto()
+
     class GeneratedCommandAdapter(ailangpy.Callable):
+        """Internal type that adapts a `Command` into a `Callable`, using the `Command`'s lifecycle methods.
+        You should never create an instance of this yourself, since it is only meant to be used inside the Ai
+        Interpreter."""
         command: commands2.Command
-        _state: CommandState
+        _state: "CommandAdapter.CommandState"
 
         def __init__(self, command: commands2.Command):
             self.command = command
-            self._state = CommandState.Inactive
+            self._state = CommandAdapter.CommandState.Inactive
 
         def call(self) -> bool:
-            if self._state == CommandState.Inactive:
+            if self._state == CommandAdapter.CommandState.Inactive:
                 self.command.initialize()
-                self._state = CommandState.Active
+                self._state = CommandAdapter.CommandState.Active
             self.command.execute()
             if self.command.isFinished():
                 self.command.end(False)
-                self._state = CommandState.Complete
+                self._state = CommandAdapter.CommandState.Complete
                 return True
             return False
 
         def terminate(self):
-            if self._state == CommandState.Active:
+            if self._state == CommandAdapter.CommandState.Active:
                 self.command.end(True)
-                self._state = CommandState.Complete
+                self._state = CommandAdapter.CommandState.Complete
 
 
     def __init__(self, command: type[commands2.Command], checker: Callable[[list[ailangpy.Arg]], None], default_args: list[Any] = []):
+        """
+        Creates a new instance of `CommandAdapter`, which wraps the given command type, and uses the given checker as the 
+        `check_syntax` method. 
+
+        If you specify any `default_args`, they are used as the first arguments to the `Command`'s
+        constructor, before the arguments provided by Ai. This is useful for specifying fixed requirements, such as 
+        resources like `Subsystem`s or controllers.
+        """
         self.command_class = command
         self.checker = checker
         self.default_args = default_args
 
-    def generate(self, args: list[int|float|str|bool|None]) -> "CommandAdapter.GeneratedCommandAdapter":
+    def generate(self, args: list[Any]) -> "CommandAdapter.GeneratedCommandAdapter":
         cmd = self.command_class(*self.default_args, *args)
         return CommandAdapter.GeneratedCommandAdapter(cmd)
 
@@ -104,6 +130,11 @@ class CommandAdapter(ailangpy.CallableGenerator):
         self.checker(args)
 
 def register_command(self: ailangpy.Interpreter, name: str, command: type[commands2.Command], checker: Callable[[list[ailangpy.Arg]], None], default_args: list[Any] = []):
+    """
+    Registers a Command with the given Interpreter instance, automatically wrapping it in the adapter. This method is
+    monkey-patched into the actual Interpreter class, so there's no need to import it directly, so long as you import
+    the interpreter_command module
+    """
     adapter = CommandAdapter(command, checker, default_args)
     self.register_callable(name, adapter)
 
