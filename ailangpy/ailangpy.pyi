@@ -1,6 +1,17 @@
-from typing import Union, Any, final
+from typing import Union, Any, final, Annotated
 
-Value = Union[str, int, float, bool, None]
+Value = Annotated[Union[str, int, float, bool, None],
+    """
+    A generic Ai value.
+
+    WARNING: This type is not actually defined or exported in any way by ailangpy. 
+    This is strictly for documentation convenience. Any attempt to use this as a
+    type hint *will* cause things to blow up in exciting ways.
+
+    Instead, prefer `typing.Any` or define your own copy. Both should be close enough
+    in a vast majority of cases.
+    """
+    ]
 
 @final
 class Interpreter:
