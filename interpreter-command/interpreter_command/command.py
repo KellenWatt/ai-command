@@ -25,7 +25,9 @@ class AiCommand(commands2.Command):
         self.terp.reset()
 
     def execute(self):
-        if not self.terp.run():
+        running = self.terp.run()
+        print(f"is_finished: {not running}")
+        if not running:
             self.complete = True
 
     def end(self, interrupted: bool):
@@ -33,7 +35,7 @@ class AiCommand(commands2.Command):
             # otherwise (the equivalent of) stop will be called organically in "execute"
             self.terp.stop()
 
-    def is_finished(self) -> bool:
+    def isFinished(self) -> bool:
         return self.complete
 
 
