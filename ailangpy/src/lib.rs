@@ -607,8 +607,8 @@ impl Interpreter {
         map_pyerr!(self.0.end())
     }
 
-    /// Invokes the interpreter, which will continue until it yields. Returns `True` if the program
-    /// is complete, otherwise returns `False`.
+    /// Invokes the interpreter, which will continue until it yields. Returns `False` if the program
+    /// is complete, otherwise returns `True`.
     fn run(&mut self) -> PyResult<bool> {
         map_pyerr!(self.0.step().map(|s| s == AiInterpreterState::Yield))
     }

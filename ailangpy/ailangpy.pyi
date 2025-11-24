@@ -57,8 +57,8 @@ class Interpreter:
 
     def run(self) -> bool:
         """
-        Invokes the interpreter, which will continue until it yields. Returns `True` if the program
-        is complete, otherwise returns `False`.
+        Invokes the interpreter, which will continue until it yields. Returns `False` if the program
+        is complete, otherwise returns `True`.
         """
         ...
     def stop(self) -> None:
