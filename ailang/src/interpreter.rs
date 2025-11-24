@@ -243,10 +243,10 @@ impl Interpreter {
             }
             _ => {}
         }
-        *self.state.get_mut().map_err(|_| Error::ThreadingError)? = InternalState::Unstarted;
         self.active_callables.clear();
         self.callable_index = 0;
         self.root_context = ExecutionContext::new(0);
+        *self.state.get_mut().map_err(|_| Error::ThreadingError)? = InternalState::Unstarted;
         Ok(())
     }
 
