@@ -18,11 +18,12 @@ class AiCommand(commands2.Command):
     def __init__(self, interpreter: ailangpy.Interpreter, *subsystems: commands2.Subsystem):
         super().__init__()
         self.terp = interpreter
-        self.complete = False
         self.subsystems = subsystems
         self.addRequirements(*subsystems)
 
     def initialize(self):
+        self.complete = False
+        #print("initializing AiCommand")
         for sub in self.subsystems:
             cmd = sub.getDefaultCommand()
             if cmd is not None:
@@ -42,6 +43,7 @@ class AiCommand(commands2.Command):
             self.complete = True
 
     def end(self, interrupted: bool):
+        #print("ending AiCommand" + (" abruptly" if interrupted else ""))
         if interrupted:
             # otherwise (the equivalent of) stop will be called organically in "execute"
             self.terp.stop()

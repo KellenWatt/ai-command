@@ -1,6 +1,6 @@
 [project]
 name = "interpreter-command"
-version = "2025.1.5"
+version = "2025.1.6"
 description = "An adapter interface for Ai programs to be run with a RobotPy Command interface"
 readme = "README.md"
 requires-python = ">=3.13"
