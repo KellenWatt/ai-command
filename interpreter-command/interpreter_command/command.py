@@ -19,14 +19,25 @@ class AiCommand(commands2.Command):
         super().__init__()
         self.terp = interpreter
         self.complete = False
+        self.subsystems = subsystems
         self.addRequirements(*subsystems)
 
     def initialize(self):
+        for sub in self.subsystems:
+            cmd = sub.getDefaultCommand()
+            if cmd is not None:
+                cmd.initialize()
+
         self.terp.reset()
 
     def execute(self):
         running = self.terp.run()
-        print(f"is_finished: {not running}")
+        for sub in self.subsystems:
+            cmd = sub.getDefaultCommand()
+            # These methods are guaranteed to be here, since we import adapter above
+            if cmd is not None and not sub.has_been_marked():
+                cmd.execute()
+            sub.reset_usage_mark()
         if not running:
             self.complete = True
 
@@ -34,6 +45,10 @@ class AiCommand(commands2.Command):
         if interrupted:
             # otherwise (the equivalent of) stop will be called organically in "execute"
             self.terp.stop()
+        for sub in self.subsystems:
+            cmd = sub.getDefaultCommand()
+            if cmd is not None:
+                cmd.end(interrupted)
 
     def isFinished(self) -> bool:
         return self.complete

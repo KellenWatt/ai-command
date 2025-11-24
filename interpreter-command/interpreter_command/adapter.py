@@ -57,6 +57,22 @@ def simple_args(arg_count: int) -> Callable[[list[ailangpy.Arg]], None]:
     return check
 
 
+# These use a horrible variable name. This is to minimize the chance it gets
+# accidentally screwed with by someone else's code
+def mark_used(self: commands2.Subsystem):
+    self._ai_has_marked_this_iteration = True
+
+def reset_usage_mark(self: commands2.Subsystem):
+    self._ai_has_marked_this_iteration = False
+
+def has_been_marked(self: commands2.Subsystem) -> bool:
+    return hasattr(self, "_ai_has_marked_this_iteration") and self._ai_has_marked_this_iteration
+
+
+commands2.Subsystem.mark_used = mark_used
+commands2.Subsystem.reset_usage_mark = reset_usage_mark
+commands2.Subsystem.has_been_marked = has_been_marked
+
 class CommandAdapter(ailangpy.CallableGenerator):
     """
     Interface for using a WPILib `Command` as an Ai `Callable`. This class implements `CallableGenerator`, and 
@@ -97,6 +113,10 @@ class CommandAdapter(ailangpy.CallableGenerator):
                 self.command.initialize()
                 self._state = CommandAdapter.CommandState.Active
             self.command.execute()
+
+            for sub in self.command.getRequirements():
+                sub.mark_used()
+
             if self.command.isFinished():
                 self.command.end(False)
                 self._state = CommandAdapter.CommandState.Complete
